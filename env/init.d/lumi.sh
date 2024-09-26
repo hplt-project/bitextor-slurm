@@ -1,6 +1,7 @@
 if [[ $(hostname -A) =~ "uan"[0-9][0-9] ]]; then
 	module purge
-	module load LUMI/23.03 Boost/1.81.0-cpeCray-23.03 # This must be changed if boost version changes in env/setup.d/paracrawl
+	module load LUMI/23.09
+    #module load Boost/1.81.0-cpeCray-23.03 # This must be changed if boost version changes in env/setup.d/paracrawl
 	#module purge && module load \
 	#	PrgEnv-cray/8.3.3 \
 	#	craype-x86-milan \
@@ -17,7 +18,7 @@ if [[ $(hostname -A) =~ "uan"[0-9][0-9] ]]; then
 	export IS_LUMI=true
 
 	#export PATH="/pfs/lustrep1/projappl/project_462000252/zaragoza/test_env/conda_env/bin:$PATH"
-	export PATH="/pfs/lustrep1/projappl/project_462000252/zaragoza/bitextor-8.1/bin:$PATH"
+	#export PATH="/pfs/lustrep1/projappl/project_462000252/zaragoza/bitextor-8.1/bin:$PATH"
 
 	export SQUEUE_FORMAT="%.18i %.9P %.20j %.8u %.2t %.10M %.6D %R"
 fi

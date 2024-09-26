@@ -1,6 +1,6 @@
 if [[ $(hostname -A) =~ "uan"[0-9][0-9] ]]; then
-	PROJ_DIR=/projappl/project_462000252/zaragoza
-	SCRATCH_DIR=/scratch/project_462000252/zaragoza
+	PROJ_DIR=/projappl/project_465000498/zaragoza
+	SCRATCH_DIR=/scratch/project_465000498/zaragoza/cirrus-scripts-data
 
 	# Override binaries called by env variable
 	# they should be available in PATH for lumi
@@ -22,32 +22,31 @@ if [[ $(hostname -A) =~ "uan"[0-9][0-9] ]]; then
 	}
 
 	function bicleaner_ai_model {
-		export HUGGINGFACE_HUB_CACHE="/projappl/project_462000252/.cache/huggingface/hub"
+		export HUGGINGFACE_HUB_CACHE="/projappl/project_465000498/.cache/huggingface/hub"
 		export BIFIXER_PARAMS="--aggressive_dedup -q"
 		export BICLEANER=bicleaner-ai-classify
 		export BICLEANER_THRESHOLD="0.5"
 		export BICLEANER_PARAMS="-q --batch_size 64 --block_size 100000"
 		export BICLEANER_MODEL=bitextor/bicleaner-ai-full-${TARGET_LANG%~*}-${lang%~*}
-		export HUGGINGFACE_HUB_CACHE="/projappl/project_462000252/.cache/huggingface/hub"
 	}
 
 	export DATA_CLEANING=$SCRATCH_DIR/data/clean
-	COLLECTION_ROOT="$SCRATCH_DIR/data"
+	export COLLECTION_ROOT="$SCRATCH_DIR/data"
 	declare -A COLLECTIONS=(
-		["output_wide15_filtered_sample3"]="$COLLECTION_ROOT/output_wide15_filtered_sample3"
+		["sample3"]="$COLLECTION_ROOT/output_wide15_filtered_sample3"
 		["output_wide15_filtered_sample12"]="$COLLECTION_ROOT/output_wide15_filtered_sample12"
 		["output_CommonCrawl40_filtered_sample"]="$COLLECTION_ROOT/output_CommonCrawl40_filtered_sample"
 		["wide16"]="/scratch/project_465000498/hplt/data/wide00016"
 	)
 
 	# Where jobs should be executed. Values used in functions.sh/schedule.
-	export SBATCH_ACCOUNT=project_462000252
+	export SBATCH_ACCOUNT=project_465000498
 	#TODO should investigate if this variable has to be set depending on the step
 	# small partition is allocatable by resources
 	# standard partition is allocatable by node
-	export SBATCH_PARTITION=small
+	export SBATCH_PARTITION=debug
 	export SBATCH_MEM_PER_CPU=1750 # Maximum recommended size for LUMI
-	export SLURM_LOGS=$PROJ_DIR/logs
+	export SLURM_LOGS=$SCRATCH_DIR/logs
 	export TASKS_PER_BATCH=${TPB:-1}
 
 	# How many resources should be allocated per slurm job. Defaults
