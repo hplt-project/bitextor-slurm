@@ -1,11 +1,12 @@
 #!/bin/bash
 set -euo pipefail
 
-MARIAN=/projappl/project_462000252/software/marian-bergamot
+MARIAN=/opt/marian-bergamot/build
 MODEL=$(dirname $(realpath -es ${BASH_SOURCE[0]}))/model
 
 foldfilter -s -w 500 \
 $MARIAN/marian-decoder \
-	-c $MODEL/config.intgemm8bit.alphas.yml \
+	-c $MODEL/config.yml \
 	--cpu-threads $THREADS \
-	--quiet-translation
+	--quiet-translation \
+	--max-length-crop
