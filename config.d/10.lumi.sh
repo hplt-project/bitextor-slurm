@@ -7,6 +7,7 @@ if [[ $(hostname -A) =~ "uan"[0-9][0-9] ]]; then
 	export DOCALIGN=docalign
 	export DOCJOIN=docjoin
 	export BLEUALIGN=bleualign_cpp
+    export TOKENISER="/home/docker/bitextor/third_party/preprocess/moses/tokenizer/tokenizer.perl"
 
 	function bicleaner_model {
 		local lang=$1
