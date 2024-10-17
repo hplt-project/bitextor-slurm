@@ -8,7 +8,10 @@ BATCH="$2"
 echo "Processing (${SLANG}) ${BATCH}"
 
 < ${BATCH}/text.gz gzip -dc \
-| py-segment -l $SLANG \
+| python bitextor_split.py \
+	--langcode $SLANG \
+	--process-paragraphs \
+	--metadata-output ${BATCH}/metadata.$$.gz \
 | gzip -9c \
 > ${BATCH}/sentences.$$.gz
 
@@ -20,5 +23,6 @@ echo "Expecting $docs_pt documents, found $docs_st"
 test $docs_pt -eq $docs_st || exit 1
 
 mv ${BATCH}/sentences.$$.gz ${BATCH}/sentences.gz
+mv ${BATCH}/metadata.$$.gz ${BATCH}/metadata.gz
 echo "Copied result (${SLANG}) ${BATCH}"
 

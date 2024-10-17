@@ -26,24 +26,13 @@ remove_empty_lines() {
 	awk -F"\t" '$3 != "" && $4 != "" { print }'
 }
 
-# Fix bicleaner model path for non-huggingface tools (aka bicleaner-hardrules)
-BICLEANER_MODEL_GIT_DIR=$HUGGINGFACE_HUB_CACHE/models--${BICLEANER_MODEL//\//--}
-BICLEANER_MODEL=${BICLEANER_MODEL_GIT_DIR}/snapshots/$(cat $BICLEANER_MODEL_GIT_DIR/refs/main)
-
 for match in $batch/aligned-+([0-9]).gz; do
 	echo $match 1>&2
 	matched_batch=$(echo $match | sed 's/.*-\([0-9]*\)\.gz/\1/')
-	paste <(gzip -cd ${match} \
-			| docjoin \
-				-r ${target_lang_data}/${shard}/${matched_batch}/url.gz \
-				-l $(dirname ${match})/url.gz) `# 1,2: target & source url`\
-		<(gzip -cd $match | cut -f4) `# 3: target sentence (e.g. en)` \
-		<(gzip -cd $match | cut -f3) `# 4: source sentence (e.g. mt)`\
-		<(gzip -cd $match | cut -f7) `# 5: target checksum (skipping col 5: bleualign score)`\
-		<(gzip -cd $match | cut -f6) `# 6: source checksum`
+	gzip -cd $match
 done \
 | parallel -j $THREADS --pipe --line-buffer --halt 2 \
-	bifixer - - ${TARGET_LANG%~*} ${bicleaner_lang} --sdeferredcol 5 --tdeferredcol 6 $BIFIXER_PARAMS `# 7,8: bifixer hash & score`\
+	bifixer - - ${TARGET_LANG%~*} ${bicleaner_lang} --sdeferredcol 5 --tdeferredcol 6 $BIFIXER_PARAMS `# 10,11: bifixer hash & score`\
 | ${SCRIPTS}/filter-unicode.py \
 | remove_empty_lines \
 | tee \
@@ -56,7 +45,7 @@ done \
 	--target_lang $bicleaner_lang \
 	--scol 3 \
 	--tcol 4 \
-	--metadata $BICLEANER_MODEL/metadata.yaml \
+	--metadata $BICLEANER_MODEL \
 	/dev/stdin /dev/stdout \
 | pigz -9c \
 >$HARDRULED.$TMPSFX

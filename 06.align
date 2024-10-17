@@ -18,13 +18,15 @@ TMPSFX=${JOB_ID:-$$}
 ${DOCALIGN} -j ${DOCALIGN_THREADS:-$THREADS} --threshold 0.1 \
 	${SRC_BATCH}/tokenised_${TARGET_LANG%~*}.gz \
 	${REF_BATCH}/tokenised_${TARGET_LANG%~*}.gz \
-| cut -f2- \
+| tee >(gzip ${SRC_BATCH}/pairs-${TARGET_LANG%~*}-${REF_BATCH_ID}.gz) \
+| tail -n+2 \
+| cut -f2,3 \
 | ${DOCJOIN} \
-	-li\
-	-ri\
-	-l ${SRC_BATCH}/sentences.gz\
-	-r ${REF_BATCH}/sentences.gz\
-	-l ${SRC_BATCH}/sentences_${TARGET_LANG%~*}.gz\
+	-l ${SRC_BATCH}/url.gz -r ${REF_BATCH}/url.gz \
+	-l ${SRC_BATCH}/sentences.gz -r ${REF_BATCH}/sentences.gz \
+	-l ${SRC_BATCH}/sentences_${TARGET_LANG%~*}.gz \
+	-l ${SRC_BATCH}/metadata.gz -r ${REF_BATCH}/metadata.gz \
+| cat <(echo -e "src_url\ttrg_url\tsrc_text\ttrg_text\tsrc_translated\tsrc_metadata\ttrg_metadata") - \
 | /usr/bin/time -f '{"task":"bleualign", "pair":'"$PAIR_FORMAT"', "time":'"$TIME_FORMAT"'}' \
 parallel \
 	--will-cite \
@@ -34,7 +36,9 @@ parallel \
 	--pipe \
 	--group \
 	-l 1 \
+	--header 1 \
 	${BLEUALIGN} --print-sent-hash --bleu-threshold 0.2 \
+		--metadata-header-fields paragraph_id \
 | gzip -c \
 > ${SRC_BATCH}/aligned-${REF_BATCH_ID}.gz.$TMPSFX
 
