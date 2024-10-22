@@ -32,7 +32,7 @@ for match in $batch/aligned-+([0-9]).gz; do
 	gzip -cd $match
 done \
 | parallel -j $THREADS --pipe --line-buffer --halt 2 \
-	bifixer - - ${TARGET_LANG%~*} ${bicleaner_lang} --sdeferredcol 5 --tdeferredcol 6 $BIFIXER_PARAMS `# 10,11: bifixer hash & score`\
+	bifixer - - ${TARGET_LANG%~*} ${bicleaner_lang} --sdeferredcol 6 --tdeferredcol 7 $BIFIXER_PARAMS `# 10,11: bifixer hash & score`\
 | ${SCRIPTS}/filter-unicode.py \
 | remove_empty_lines \
 | tee \
