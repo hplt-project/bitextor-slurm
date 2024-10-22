@@ -21,9 +21,9 @@
 # about the expected fields.
 
 # Default input format:
-# url1    url2    seg1    seg2    [hunalign    bicleaner    lengthratio    numTokensSL    numTokensTL   collection]
+# url1    url2    seg1    seg2    [bleualign    bicleaner    lengthratio    numTokensSL    numTokensTL   collection]
 
-# where url1 and url2 are the URLs of the document, seg1 and seg2 are the aligned pair of segments, hunalign and
+# where url1 and url2 are the URLs of the document, seg1 and seg2 are the aligned pair of segments, bleualign and
 # bicleaner are quality metrics (in this case, provided by these two tools), lengthratio is the ratio between the
 # word-length of seg1 and seg2, numTokensSL and numTokensTL is the number of tokens in each segment and is the value
 # to be assigned to each TU id parameter, and collection defines which collection a segment came from in case 
@@ -44,7 +44,7 @@ from bitextor.utils.common import open_xz_or_gzip_or_plain, dummy_open
 def remove_control_characters(text):
     return "".join(ch for ch in text if unicodedata.category(ch)[0]!="C")
 
-def printseg(lang, seg_columns, urls, seg, fields_dict, mint, checksum=None, no_delete_seg=False):
+def printseg(lang, seg_columns, urls, seg, fields_dict, mint, checksum=None, paragraphid=None, no_delete_seg=False):
     info_tag = []
     print("    <tuv xml:lang=\"" + lang + "\">")
     if "url1" in seg_columns:
@@ -52,6 +52,8 @@ def printseg(lang, seg_columns, urls, seg, fields_dict, mint, checksum=None, no_
             print("     <prop type=\"source-document\">" + escape(url) + "</prop>")
     if checksum:
         print("     <prop type=\"checksum-seg\">" + checksum + "</prop>")
+    if paragraphid:
+        print("     <prop type=\"paragrap-id\">" + paragraphid + "</prop>")
 
     if no_delete_seg or checksum is None:
         print("     <seg>" + escape(remove_control_characters(seg)) + "</seg>")
@@ -70,8 +72,8 @@ def printtu(tu_idcounter, lang1, lang2, tu_columns, tu_urls1, tu_urls2, collecti
     if 'collection' in fieldsdict and len(collections) != 0:
         for collection in collections:
             print("    <prop type=\"collection\">" + collection + "</prop>")
-    if 'hunalign' in fields_dict and fields_dict['hunalign'] != "":
-        print("    <prop type=\"score-aligner\">" + fields_dict['hunalign'] + "</prop>")
+    if 'bleualign' in fields_dict and fields_dict['bleualign'] != "":
+        print("    <prop type=\"score-aligner\">" + fields_dict['bleualign'] + "</prop>")
     if 'bicleaner' in fields_dict and fields_dict['bicleaner'] != "":
         print("    <prop type=\"score-bicleaner\">" + fields_dict['bicleaner'] + "</prop>")
     # Output info data ILSP-FC specification
@@ -87,9 +89,13 @@ def printtu(tu_idcounter, lang1, lang2, tu_columns, tu_urls1, tu_urls2, collecti
         fields_dict['checksum1'] = None
     if 'checksum2' not in fields_dict:
         fields_dict['checksum2'] = None
+    if 'paragraphid1' not in fields_dict:
+        fields_dict['paragraphid1'] = None
+    if 'paragraphid2' not in fields_dict:
+        fields_dict['paragraphid2'] = None
 
-    printseg(lang1, tu_columns, tu_urls1, fields_dict['seg1'], fields_dict, mint, fields_dict['checksum1'], no_delete_seg)
-    printseg(lang2, tu_columns, tu_urls2, fields_dict['seg2'], fields_dict, mint, fields_dict['checksum2'], no_delete_seg)
+    printseg(lang1, tu_columns, tu_urls1, fields_dict['seg1'], fields_dict, mint, fields_dict['checksum1'], fields_dict["paragraphid1"], no_delete_seg)
+    printseg(lang2, tu_columns, tu_urls2, fields_dict['seg2'], fields_dict, mint, fields_dict['checksum2'], fields_dict["paragraphid2"], no_delete_seg)
 
     print("   </tu>")
 
@@ -112,8 +118,8 @@ oparser.add_argument("-m", "--max-length", help="Maximum length ratio between tw
 oparser.add_argument("-t", "--min-tokens", help="Minimum number of tokens in a TU", type=int, dest="mint", default=3)
 oparser.add_argument("-c", "--columns",
                      help="Column names of the input tab separated file. Default: url1,url2,seg1,seg2. Other "
-                          "options:hunalign,bifixerhash,bifixerscore,bicleaner,lengthratio,numTokensSL,numTokensTL,"
-                          "checksum1,checksum2,collection",
+                          "options:bleualign,bifixerhash,bifixerscore,bicleaner,lengthratio,numTokensSL,numTokensTL,"
+                          "checksum1,checksum2,paragraphid1,paragraphid2,collection",
                      default="url1,url2,seg1,seg2")
 oparser.add_argument("-d", "--no-delete-seg", help="Avoid deleting <seg> if standoff annotation checksum is given",
                      dest="no_delete_seg", action='store_true')
