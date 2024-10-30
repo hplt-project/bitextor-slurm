@@ -25,8 +25,7 @@ for lang in $*; do
 				-a $job_list \
 				--time 24:00:00 \
 				--cpus-per-task 4 `#because more memory` \
-				-e ${SLURM_LOGS}/09.clean-%A_%a.err \
-				-o ${SLURM_LOGS}/09.clean-%A_%a.out \
+				-o ${SLURM_LOGS}/09.clean-%A_%a.log \
 				${SCRIPTS}/generic.slurm $batch_list \
 				${SCRIPTS}/09.clean ${collection} ${lang%~*} \
 				${COLLECTIONS[$collection]}-shards/${TARGET_LANG}

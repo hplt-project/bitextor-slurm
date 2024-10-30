@@ -30,8 +30,7 @@ if [ ! -f $output_file ] || ! $RETRY; then
 			-J reduce-classified-${lang%~*} \
 			--time 24:00:00 \
 			--cpus-per-task 1 \
-			-e ${SLURM_LOGS}/10.reduce-classified-%A.err \
-			-o ${SLURM_LOGS}/10.reduce-classified-%A.out \
+			-o ${SLURM_LOGS}/10.reduce-classified-%A.log \
 			${SCRIPTS}/10.reduce-classified ${lang%~*} ${output_file} ${batch_lists[@]}
 	fi
 fi

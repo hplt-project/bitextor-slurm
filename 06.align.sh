@@ -39,10 +39,9 @@ function make_batch_list_retry {
 }
 
 declare -a OPTIONS=(
-	--time 12:00:00
+	--time 24:00:00
 	--cpus-per-task 4
-	-e ${SLURM_LOGS}/06.align-%A_%a.err
-	-o ${SLURM_LOGS}/06.align-%A_%a.out
+	-o ${SLURM_LOGS}/06.align-%A_%a.log
 )
 
 collection=$1
