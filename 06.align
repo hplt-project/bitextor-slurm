@@ -39,6 +39,7 @@ parallel \
 	--header 1 \
 	${BLEUALIGN} --print-sent-hash --bleu-threshold 0.2 \
 		--metadata-header-fields paragraph_id \
+| grep -Pv "src_url\ttrg_url\tsrc_text\ttrg_text" \
 | gzip -c \
 > ${SRC_BATCH}/aligned-${REF_BATCH_ID}.gz.$TMPSFX
 
