@@ -45,7 +45,7 @@ if [[ $(hostname -A) =~ "uan"[0-9][0-9] ]]; then
 	#TODO should investigate if this variable has to be set depending on the step
 	# small partition is allocatable by resources
 	# standard partition is allocatable by node
-	export SBATCH_PARTITION=debug
+	export SBATCH_PARTITION=small
 	export SBATCH_MEM_PER_CPU=1750 # Maximum recommended size for LUMI
 	export SLURM_LOGS=$SCRATCH_DIR/logs
 	export TASKS_PER_BATCH=${TPB:-1}
