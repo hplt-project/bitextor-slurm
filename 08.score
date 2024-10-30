@@ -22,6 +22,7 @@ test -r $HARDRULED
 paste <(zcat $FIXED) <(zcat $HARDRULED) \
 | LD_LIBRARY_PATH=/opt/rocm/lib cache -k 3,4 ./score-wrap.py $BICLEANER $BICLEANER_PARAMS \
 	--score_only \
+	--scol 4 --tcol 3 \
 	--tmp_dir $TMPDIR \
 	--disable_hardrules \
 	--disable_porn_removal \
