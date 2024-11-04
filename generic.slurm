@@ -74,7 +74,7 @@ awk "NR > $GROUP_START && NR <= $GROUP_END" $BATCHES \
     -B $(pwd -P) \
     -B $COLLECTION_ROOT \
     --pwd $(pwd -P) \
-    cirrus-scripts.sif \
+    bitextor-slurm.sif \
 parallel \
 	--will-cite \
 	-j${SLURM_TASKS_PER_NODE} \

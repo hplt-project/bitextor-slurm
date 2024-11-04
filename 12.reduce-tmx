@@ -9,14 +9,14 @@ shift 3
 filtered_input=$@
 
 pigz -cd $filtered_input \
-| singularity exec -B $(pwd -P) --pwd $(pwd -P) cirrus-scripts.sif \
+| singularity exec -B $(pwd -P) --pwd $(pwd -P) bitextor-slurm.sif \
 python3 bitextor-buildTMX.py \
 	--lang1 ${TARGET_LANG%~*} --lang2 ${lang} \
 	-c "url1,url2,seg1,seg2,bleualign,checksum1,checksum2,paragraphid1,paragraphid2,bifixerhash,bifixerscore,bicleaner,collection" \
 	--no-delete-seg \
 	--dedup "bifixerhash" \
 | tee >(pigz > $tmx_output.$$) \
-| singularity exec -B $(pwd -P) --pwd $(pwd -P) cirrus-scripts.sif \
+| singularity exec -B $(pwd -P) --pwd $(pwd -P) bitextor-slurm.sif \
 python /home/docker/bitextor/third_party/biroamer/tmxt/tmxt.py \
 	--codelist=${TARGET_LANG%~*},${lang} \
 | pigz \

@@ -20,7 +20,7 @@ export LC_ALL=C
 
 cat $@ \
 | sed "s/$/\/filtered${BICLEANER_THRESHOLD/./}.gz/" \
-| singularity exec -B $COLLECTION_ROOT cirrus-scripts.sif \
+| singularity exec -B $COLLECTION_ROOT bitextor-slurm.sif \
 merge_sort \
 	-f- \
 	-j$njobs \

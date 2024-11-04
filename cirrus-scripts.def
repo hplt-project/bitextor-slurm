@@ -1,2 +1,0 @@
-bootstrap: docker-daemon
-from: cirrus-scripts:latest
