@@ -43,5 +43,15 @@ parallel \
 | gzip -c \
 > ${SRC_BATCH}/aligned-${REF_BATCH_ID}.gz.$TMPSFX
 
-mv ${SRC_BATCH}/aligned-${REF_BATCH_ID}.gz{.$TMPSFX,}
+/usr/bin/time -f '{"task":"docout", "pair":'"$PAIR_FORMAT"', "time":'"$TIME_FORMAT"'}' \
+zcat ${SRC_BATCH}/pairs-${TARGET_LANG%~*}-${REF_BATCH_ID}.gz \
+| tail -n+2 \
+| cut -f2,3 \
+| ${DOCJOIN} \
+	-l ${SRC_BATCH}/url.gz -r ${REF_BATCH}/url.gz \
+	-l ${SRC_BATCH}/text.gz -r ${REF_BATCH}/text.gz \
+| gzip -c \
+> ${SRC_BATCH}/docs-aligned-${REF_BATCH_ID}.gz.$TMPSFX
 
+mv ${SRC_BATCH}/aligned-${REF_BATCH_ID}.gz{.$TMPSFX,}
+mv ${SRC_BATCH}/docs-aligned-${REF_BATCH_ID}.gz{.$TMPSFX,}
