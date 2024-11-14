@@ -9,6 +9,8 @@ batch=$4
 shard=$(basename $(dirname $batch))
 
 TMPSFX=${JOB_ID:-$$}
+ALIGNED=$batch/aligned.gz
+DOCS=$batch/docs-aligned.gz
 FIXED=$batch/fixed.gz
 HARDRULED=$batch/hardruled.gz
 
@@ -20,11 +22,7 @@ remove_empty_lines() {
 	awk -F"\t" '$3 != "" && $4 != "" { print }'
 }
 
-for match in $batch/aligned-+([0-9]).gz; do
-	echo $match 1>&2
-	matched_batch=$(echo $match | sed 's/.*-\([0-9]*\)\.gz/\1/')
-	gzip -cd $match
-done \
+zcat $ALIGNED \
 | parallel -j $THREADS --pipe --line-buffer --halt 2 \
 	bifixer - - $lang ${TARGET_LANG%~*} --sdeferredcol 6 --tdeferredcol 7 $BIFIXER_PARAMS `# 10,11: bifixer hash & score`\
 | ${SCRIPTS}/filter-unicode.py \
@@ -46,10 +44,14 @@ done \
 | pigz -9c \
 >$HARDRULED.$TMPSFX
 
+
 LC_HARDRULED=$(gzip -cd < $HARDRULED.$TMPSFX | wc -l)
 LC_FIXED=$(gzip -cd < $FIXED.$TMPSFX | wc -l)
+LC_ALIGNED=$(gzip -cd < $ALIGNED | wc -l)
 echo "hardrules.gz has $LC_HARDRULED lines, fixed.gz has $LC_FIXED lines."
 test $LC_HARDRULED -eq $LC_FIXED
+echo "hardrules.gz has $LC_HARDRULED lines, aligned.gz has $LC_ALIGNED lines."
+test $LC_HARDRULED -eq $LC_ALIGNED
 
 mv $FIXED.$TMPSFX $FIXED
 mv $HARDRULED.$TMPSFX $HARDRULED

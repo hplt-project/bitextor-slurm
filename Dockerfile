@@ -82,7 +82,7 @@ ENV LANG=en_US.UTF-8 LANGUAGE=en_US:en LC_ALL=en_US.UTF-8
 RUN echo "Cloning bitextor"
 RUN git clone --recursive --jobs 6 https://github.com/bitextor/bitextor /home/docker/bitextor
 WORKDIR /home/docker/bitextor
-RUN git checkout v8.3
+RUN git checkout hplt
 #COPY ./ bitextor/
 
 # Installing bitextor dependencies
@@ -143,7 +143,8 @@ RUN git clone https://github.com/browsermt/marian-dev /opt/marian-bergamot
 WORKDIR /opt/marian-bergamot
 RUN git checkout 2be8344fcf2776fb43a7376284067164674cbfaf
 WORKDIR /opt/marian-bergamot/build
-RUN cmake .. -DUSE_SENTENCEPIECE=on -DCOMPILE_CUDA=off -DUSE_FBGEMM=on
+# compile for cpu arch znver3 for lumi cpu nodes, change accordingly if a different machine
+RUN cmake .. -DUSE_SENTENCEPIECE=on -DCOMPILE_CUDA=off -DUSE_FBGEMM=on -DBUILD_ARCH=znver3
 RUN make -j24
 
 RUN pip install -U bicleaner-ai

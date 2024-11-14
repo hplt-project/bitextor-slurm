@@ -38,6 +38,29 @@ function make_batch_list_retry {
 	echo $batch_list
 }
 
+function make_batch_list_reduce {
+	local step="$1" collection="$2" lang="$3"
+	local batch_list=${COLLECTIONS[$collection]}-batches/${step}.${lang}
+
+	if [[ ! -d ${COLLECTIONS[$collection]}-batches ]]; then
+		mkdir ${COLLECTIONS[$collection]}-batches
+	fi
+
+	if $FORCE_INDEX_BATCHES || [[ ! -f ${COLLECTIONS[$collection]}-batches/${lang} ]]; then
+		find ${COLLECTIONS[$collection]}-shards/${lang} \
+			-mindepth 2 \
+			-maxdepth 2 \
+			-type d \
+			-regex '.*/[0-9]+/[0-9]+' \
+			> ${COLLECTIONS[$collection]}-batches/${lang}
+	fi
+
+	rm -f ${batch_list}
+	ln -s ${COLLECTIONS[$collection]}-batches/${lang} ${batch_list}
+
+	echo ${batch_list}
+}
+
 declare -a OPTIONS=(
 	--time 24:00:00
 	--cpus-per-task 4
@@ -50,15 +73,27 @@ shift
 for lang in $*; do
 	batch_list=`make_batch_list $collection $lang`
 	job_list=`make_job_list $batch_list`
+	batch_list_reduce=`make_batch_list_reduce 06 $collection $lang`
+	job_list_reduce=`make_job_list $batch_list_reduce`
 	if [ ! -z $job_list ]; then
 		prompt "Scheduling $job_list\n"
 		if confirm; then
-			schedule \
+			align_job_id=$(schedule \
 				-J align-${lang%~*}-${collection} \
 				-a $job_list \
+				--parsable \
 				${OPTIONS[@]} \
 				${SCRIPTS}/generic.slurm $batch_list \
-				${SCRIPTS}/06.align ${lang%~*}
+				${SCRIPTS}/06.align ${lang%~*})
+
+			schedule \
+				-J reduce-align-${lang%~*}-${collection} \
+				-a $job_list_reduce \
+				--dependency afterok:$align_job_id \
+				--time 24:00:00 --cpus-per-task 1 \
+				-o ${SLURM_LOGS}/06.reduce-align-%A_%a.log \
+				${SCRIPTS}/generic.slurm $batch_list_reduce \
+				${SCRIPTS}/06.reduce-align ${lang%~*}
 		fi
 	fi
 done

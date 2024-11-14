@@ -1,0 +1,18 @@
+#!/bin/bash
+set -euo pipefail
+shopt -s extglob
+
+lang="$1"
+batch="$2"
+
+TMPSFX=${JOB_ID:-$$}
+ALIGNED=$batch/aligned.gz
+DOCS=$batch/docs-aligned.gz
+
+cat $batch/aligned-+([0-9]).gz >$ALIGNED.$TMPSFX
+cat $batch/docs-aligned-+([0-9]).gz >$DOCS.$TMPSFX
+
+rm $batch/aligned-+([0-9]).gz
+rm $batch/docs-aligned-+([0-9]).gz
+mv $ALIGNED.$TMPSFX $ALIGNED
+mv $DOCS.$TMPSFX $DOCS

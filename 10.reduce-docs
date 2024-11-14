@@ -11,7 +11,7 @@ mkdir -p $(dirname $output_file)
 cat $@ \
 | while read batch; do
 	echo "Reading $batch" >&2
-	cat $batch/docs-aligned-*.gz
+	cat $batch/docs-aligned.gz
 done \
 > $output_file.$TMPSFX
 mv $output_file.$TMPSFX $output_file
