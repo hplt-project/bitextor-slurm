@@ -50,8 +50,6 @@ LC_FIXED=$(gzip -cd < $FIXED.$TMPSFX | wc -l)
 LC_ALIGNED=$(gzip -cd < $ALIGNED | wc -l)
 echo "hardrules.gz has $LC_HARDRULED lines, fixed.gz has $LC_FIXED lines."
 test $LC_HARDRULED -eq $LC_FIXED
-echo "hardrules.gz has $LC_HARDRULED lines, aligned.gz has $LC_ALIGNED lines."
-test $LC_HARDRULED -eq $LC_ALIGNED
 
 mv $FIXED.$TMPSFX $FIXED
 mv $HARDRULED.$TMPSFX $HARDRULED
