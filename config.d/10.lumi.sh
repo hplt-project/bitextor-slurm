@@ -22,13 +22,13 @@ if [[ $(hostname -A) =~ "uan"[0-9][0-9] ]]; then
 		export BICLEANER_MODEL=$PROJ_DIR/bicleaner-models/${TARGET_LANG%~*}-${lang%~*}/${TARGET_LANG%~*}-${lang%~*}.yaml
 	}
 
+	export HF_HUB_CACHE="/projappl/project_462000688/.cache/huggingface/hub"
 	function bicleaner_ai_model {
-		#export HUGGINGFACE_HUB_CACHE="/projappl/project_462000688/.cache/huggingface/hub"
 		export BIFIXER_PARAMS="--aggressive_dedup -q --ignore_segmentation"
 		export BICLEANER=bicleaner-ai-classify
 		export BICLEANER_THRESHOLD="0.5"
 		export BICLEANER_PARAMS="-q --batch_size 64 --block_size 100000"
-		export BICLEANER_MODEL=bitextor/bicleaner-ai-full-${TARGET_LANG%~*}-xx
+		export BICLEANER_MODEL=bitextor/bicleaner-ai-full-large-${TARGET_LANG%~*}-xx
 	}
 
 	export DATA_CLEANING=$SCRATCH_DIR/data/clean

@@ -73,6 +73,7 @@ awk "NR > $GROUP_START && NR <= $GROUP_END" $BATCHES \
     $MOUNT_ROCM \
     -B $(pwd -P) \
     -B $COLLECTION_ROOT \
+    -B $HF_HUB_CACHE \
     --pwd $(pwd -P) \
     bitextor-slurm.sif \
 parallel \
