@@ -27,10 +27,10 @@ function make_batch_list_retry {
 	batch_list=${COLLECTIONS[$collection]}-batches/06.${lang}-${TARGET_LANG}.$(date '+%Y%m%d%H%M%S')
 
 	cat `make_batch_list_all "$@"` | while read SRC_BATCH REF_BATCH; do
-		alignments=$SRC_BATCH/aligned-$(basename $REF_BATCH).gz
+		alignments=$SRC_BATCH/aligned.gz
 		# either if the alignments doesn't exist, or the tokenised_en.gz file is newer than aligned-n.gz
 		if [[ ! -e $alignments ]] || [[ $SRC_BATCH/tokenised_${TARGET_LANG%~*}.gz -nt $alignments ]]; then
-			echo $alignments 1>&2
+			printf '%s\t%s\n' "$alignments" "$REF_BATCH" 1>&2
 			printf '%s\t%s\n' "$SRC_BATCH" "$REF_BATCH"
 		fi
 	done | shuf > $batch_list
