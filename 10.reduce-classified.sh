@@ -21,7 +21,7 @@ for collection in $collections; do
 done
 
 mkdir -p $DATA_CLEANING
-output_file="${DATA_CLEANING}/${TARGET_LANG}-${lang}/${TARGET_LANG%~*}-${lang%~*}.${collection_hash}.classified.gz"
+output_file="${DATA_CLEANING}/${lang}-${TARGET_LANG}/${lang%~*}-${TARGET_LANG%~*}.${collection_hash}.classified.gz"
 output_file_docs="${output_file/classified.gz/docs.gz}"
 
 if [ ! -f $output_file ] || ! $RETRY; then

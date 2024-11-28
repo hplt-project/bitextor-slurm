@@ -14,7 +14,7 @@ collection_hash=$(printf "%s\n" $collections | sort | join_by -)
 # Load the bicleaner model as we need to know the BICLEANER_THESHOLD
 bicleaner_model ${lang%~*}
 
-output_base="${DATA_CLEANING}/${TARGET_LANG}-${lang}/${TARGET_LANG%~*}-${lang%~*}.${collection_hash}"
+output_base="${DATA_CLEANING}/${lang}-${TARGET_LANG}/${lang%~*}-${TARGET_LANG%~*}.${collection_hash}"
 
 # Lots of work to determine which files need to be (re)generated while only
 # calling `confirm` once.
