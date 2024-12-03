@@ -151,6 +151,7 @@ RUN pip install -U bicleaner-ai
 RUN pip uninstall -y tensorflow keras
 RUN pip install tensorflow-rocm==2.12.1.600
 RUN fastspell-download
+RUN pip install ctranslate2
 
 RUN apt-get remove -yy intel-mkl-64bit-2020.0-088 build-essential && apt-get -yy autoremove && \
     rm -Rf /opt/marian-bergamot/build/src && \
