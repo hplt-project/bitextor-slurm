@@ -19,6 +19,7 @@ python3 bitextor-buildTMX.py \
 | singularity exec -B $(pwd -P) --pwd $(pwd -P) bitextor-slurm.sif \
 python /home/docker/bitextor/third_party/biroamer/tmxt/tmxt.py \
 	--codelist=${TARGET_LANG%~*},${lang} \
+| awk -F'\t' -v OFS='\t' '{print $2, $1}' \
 | pigz \
 > $txt_output.$TMPSFX
 
