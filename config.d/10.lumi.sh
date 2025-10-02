@@ -1,6 +1,6 @@
 if [[ $(hostname -A) =~ "uan"[0-9][0-9] ]]; then
-	PROJ_DIR=/projappl/project_462000688/zaragoza
-	SCRATCH_DIR=/scratch/project_462000688/zaragoza/cirrus-scripts-data
+	PROJ_DIR=/project/project_465001864/zaragoza
+	SCRATCH_DIR=/scratch/project_465001864/bitexting_test/shards
 
 	# Override binaries called by env variable
 	# they should be available in PATH for lumi
@@ -22,7 +22,7 @@ if [[ $(hostname -A) =~ "uan"[0-9][0-9] ]]; then
 		export BICLEANER_MODEL=$PROJ_DIR/bicleaner-models/${TARGET_LANG%~*}-${lang%~*}/${TARGET_LANG%~*}-${lang%~*}.yaml
 	}
 
-	export HF_HUB_CACHE="/projappl/project_462000688/.cache/huggingface/hub"
+	export HF_HUB_CACHE="/projappl/project_465001864/.cache/huggingface/hub"
 	function bicleaner_ai_model {
 		export BIFIXER_PARAMS="--aggressive_dedup -q --ignore_segmentation"
 		export BICLEANER=bicleaner-ai-classify
@@ -31,17 +31,14 @@ if [[ $(hostname -A) =~ "uan"[0-9][0-9] ]]; then
 		export BICLEANER_MODEL=bitextor/bicleaner-ai-full-large-${TARGET_LANG%~*}-xx
 	}
 
-	export DATA_CLEANING=$SCRATCH_DIR/data/clean
-	export COLLECTION_ROOT="$SCRATCH_DIR/data"
+	export DATA_CLEANING=$SCRATCH_DIR/clean
+	export COLLECTION_ROOT="$SCRATCH_DIR"
 	declare -A COLLECTIONS=(
-		["sample3"]="$COLLECTION_ROOT/output_wide15_filtered_sample3"
-		["output_wide15_filtered_sample12"]="$COLLECTION_ROOT/output_wide15_filtered_sample12"
-		["output_CommonCrawl40_filtered_sample"]="$COLLECTION_ROOT/output_CommonCrawl40_filtered_sample"
-		["wide16"]="/scratch/project_462000688/hplt/data/wide00016"
+		["sample3"]="$COLLECTION_ROOT/CC-MAIN-2014-15"
 	)
 
 	# Where jobs should be executed. Values used in functions.sh/schedule.
-	export SBATCH_ACCOUNT=project_462000688
+	export SBATCH_ACCOUNT=project_465001864
 	#TODO should investigate if this variable has to be set depending on the step
 	# small partition is allocatable by resources
 	# standard partition is allocatable by node
