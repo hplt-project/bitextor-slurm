@@ -21,7 +21,7 @@ ${DOCALIGN} -j ${DOCALIGN_THREADS:-$THREADS} --threshold 0.1 \
 | tee >(gzip >${SRC_BATCH}/pairs-${TARGET_LANG%~*}-${REF_BATCH_ID}.gz) \
 | tail -n+2 \
 | ${DOCJOIN} \
-	-l ${SRC_BATCH}/url.gz -r ${REF_BATCH}/url.gz \
+	-l ${SRC_BATCH}/id.gz -r ${REF_BATCH}/id.gz \
 	-l ${SRC_BATCH}/sentences.gz -r ${REF_BATCH}/sentences.gz \
 	-l ${SRC_BATCH}/sentences_${TARGET_LANG%~*}.gz \
 	-l ${SRC_BATCH}/metadata.gz -r ${REF_BATCH}/metadata.gz \
@@ -47,7 +47,7 @@ parallel \
 zcat ${SRC_BATCH}/pairs-${TARGET_LANG%~*}-${REF_BATCH_ID}.gz \
 | tail -n+2 \
 | ${DOCJOIN} -s \
-	-l ${SRC_BATCH}/url.gz -r ${REF_BATCH}/url.gz \
+	-l ${SRC_BATCH}/id.gz -r ${REF_BATCH}/id.gz \
 	-l ${SRC_BATCH}/text.gz -r ${REF_BATCH}/text.gz \
 | gzip -c \
 > ${SRC_BATCH}/docs-aligned-${REF_BATCH_ID}.gz.$TMPSFX
