@@ -14,7 +14,7 @@ collection_hash=$(printf "%s\n" $collections | sort | join_by -)
 # Load the bicleaner model as we need to know the BICLEANER_THESHOLD
 bicleaner_model ${lang%~*}
 
-output_base="${DATA_CLEANING}/${TARGET_LANG}-${lang}/${TARGET_LANG%~*}-${lang%~*}.${collection_hash}"
+output_base="${DATA_CLEANING}/${lang}-${TARGET_LANG}/${lang%~*}-${TARGET_LANG%~*}.${collection_hash}"
 
 # Lots of work to determine which files need to be (re)generated while only
 # calling `confirm` once.
@@ -36,8 +36,7 @@ if ( $needs_tmx || $needs_deferred ) && confirm; then
 			-J reduce-tmx-${lang%~*} \
 			--time 36:00:00 \
 			--cpus-per-task 4 \
-			-e ${SLURM_LOGS}/12.reduce-tmx-%A.err \
-			-o ${SLURM_LOGS}/12.reduce-tmx-%A.out \
+			-o ${SLURM_LOGS}/12.reduce-tmx-%A.log \
 			${SCRIPTS}/12.reduce-tmx ${lang%~*} \
 				"${output_base}.tmx.gz" \
 				"${output_base}.txt.gz" \
@@ -49,8 +48,7 @@ if ( $needs_tmx || $needs_deferred ) && confirm; then
 			-J reduce-tmx-deferred-${lang%~*} \
 			--time 36:00:00 \
 			--cpus-per-task 4 \
-			-e ${SLURM_LOGS}/12.reduce-tmx-%A.err \
-			-o ${SLURM_LOGS}/12.reduce-tmx-%A.out \
+			-o ${SLURM_LOGS}/12.reduce-tmx-%A.log \
 			${SCRIPTS}/12.reduce-tmx-deferred ${lang%~*} \
 				"${output_base}.deferred.tmx.gz" \
 				"${output_base}.filtered${BICLEANER_THRESHOLD/./}.gz"

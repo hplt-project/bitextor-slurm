@@ -18,23 +18,40 @@ TMPSFX=${JOB_ID:-$$}
 ${DOCALIGN} -j ${DOCALIGN_THREADS:-$THREADS} --threshold 0.1 \
 	${SRC_BATCH}/tokenised_${TARGET_LANG%~*}.gz \
 	${REF_BATCH}/tokenised_${TARGET_LANG%~*}.gz \
-| tee ${SRC_BATCH}/pairs-${TARGET_LANG%~*}-${REF_BATCH_ID}.txt \
+| tee >(gzip >${SRC_BATCH}/pairs-${TARGET_LANG%~*}-${REF_BATCH_ID}.gz) \
+| tail -n+2 \
 | ${DOCJOIN} \
-	-li\
-	-ri\
-	-l ${SRC_BATCH}/sentences.gz\
-	-r ${REF_BATCH}/sentences.gz\
-	-l ${SRC_BATCH}/sentences_${TARGET_LANG%~*}.gz\
+	-l ${SRC_BATCH}/id.gz -r ${REF_BATCH}/id.gz \
+	-l ${SRC_BATCH}/sentences.gz -r ${REF_BATCH}/sentences.gz \
+	-l ${SRC_BATCH}/sentences_${TARGET_LANG%~*}.gz \
+	-l ${SRC_BATCH}/metadata.gz -r ${REF_BATCH}/metadata.gz \
+| cat <(echo -e "src_url\ttrg_url\tsrc_text\ttrg_text\tsrc_translated\tsrc_metadata\ttrg_metadata") - \
 | /usr/bin/time -f '{"task":"bleualign", "pair":'"$PAIR_FORMAT"', "time":'"$TIME_FORMAT"'}' \
 parallel \
+	--will-cite \
 	--tmpdir=$TMPDIR \
 	-j${BLEUALIGN_THREADS:-$THREADS} \
 	--halt 2 \
 	--pipe \
 	--group \
 	-l 1 \
+	--header 1 \
 	${BLEUALIGN} --print-sent-hash --bleu-threshold 0.2 \
+		--metadata-header-fields paragraph_id \
+`# Remove bleualign header and prevent grep returning error when the output is empty` \
+| { grep -Pv "src_url\ttrg_url\tsrc_text\ttrg_text" || true; } \
 | gzip -c \
 > ${SRC_BATCH}/aligned-${REF_BATCH_ID}.gz.$TMPSFX
-mv ${SRC_BATCH}/aligned-${REF_BATCH_ID}.gz{.$TMPSFX,}
 
+/usr/bin/time -f '{"task":"docout", "pair":'"$PAIR_FORMAT"', "time":'"$TIME_FORMAT"'}' \
+zcat ${SRC_BATCH}/pairs-${TARGET_LANG%~*}-${REF_BATCH_ID}.gz \
+| tail -n+2 \
+| ${DOCJOIN} -s \
+	-l ${SRC_BATCH}/id.gz -r ${REF_BATCH}/id.gz \
+	-l ${SRC_BATCH}/text.gz -r ${REF_BATCH}/text.gz \
+| gzip -c \
+> ${SRC_BATCH}/docs-aligned-${REF_BATCH_ID}.gz.$TMPSFX
+
+rm ${SRC_BATCH}/pairs-${TARGET_LANG%~*}-${REF_BATCH_ID}.gz
+mv ${SRC_BATCH}/aligned-${REF_BATCH_ID}.gz{.$TMPSFX,}
+mv ${SRC_BATCH}/docs-aligned-${REF_BATCH_ID}.gz{.$TMPSFX,}

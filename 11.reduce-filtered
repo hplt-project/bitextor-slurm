@@ -7,22 +7,25 @@ shift
 
 # Set up temp directory
 TMPSFX=${JOB_ID:-$$}
-#TMPDIR=$(mktemp -d --tmpdir=$(dirname $output_file) --suffix=_$TMPSFX)
-TMPDIR=$(mktemp -d --tmpdir=$SCRATCH --suffix=_$TMPSFX)
+TMPDIR=$(mktemp -d --tmpdir=$(dirname $output_file) --suffix=_$TMPSFX)
+#TMPDIR=$(mktemp -d --tmpdir=$SCRATCH --suffix=_$TMPSFX)
 test -d "$TMPDIR"
 trap "rm -rf $TMPDIR" EXIT
 
 # Make sure we can write output
 mkdir -p $(dirname $output_file)
 
+njobs=${THREADS:-$SLURM_CPUS_ON_NODE}
+export LC_ALL=C
+
 cat $@ \
 | sed "s/$/\/filtered${BICLEANER_THRESHOLD/./}.gz/" \
-| LC_ALL=C merge_sort \
+| singularity exec -B $COLLECTION_ROOT bitextor-slurm.sif \
+merge_sort \
 	-f- \
-	-j${THREADS:-$SLURM_CPUS_ON_NODE} \
-	-t$'\t' \
-	-k7,7 \
-	-k8,8nr \
+	-j$njobs \
+	-k10,10 \
+	-k11,11nr \
 | pigz \
 > $output_file.$TMPSFX
 

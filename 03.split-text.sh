@@ -20,8 +20,7 @@ for lang in $*; do
 				-J split-${lang}-${collection} \
 				-a $job_list \
 				--time 24:00:00 \
-				-e ${SLURM_LOGS}/03.split-%A_%a.err \
-				-o ${SLURM_LOGS}/03.split-%A_%a.out \
+				-o ${SLURM_LOGS}/03.split-%A_%a.log \
 				${SCRIPTS}/generic.slurm $batch_list \
 				${SCRIPTS}/03.split-text $lang
 		fi

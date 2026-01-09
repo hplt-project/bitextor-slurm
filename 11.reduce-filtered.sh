@@ -23,17 +23,16 @@ for collection in $collections; do
 	batch_lists+=( $batch_list )
 done
 
-output_file="${DATA_CLEANING}/${TARGET_LANG}-${lang}/${TARGET_LANG%~*}-${lang%~*}.${collection_hash}.filtered${BICLEANER_THRESHOLD/./}.gz"
+output_file="${DATA_CLEANING}/${lang}-${TARGET_LANG}/${lang%~*}-${TARGET_LANG%~*}.${collection_hash}.filtered${BICLEANER_THRESHOLD/./}.gz"
 
 if [ ! -f $output_file ] || ! $RETRY; then
 	prompt "Scheduling 1-1 for combining $batch_count batches across ${#batch_lists[@]} collections\n"
 	if confirm; then
 		schedule \
 			-J reduce-filtered-${lang%~*} \
-			--time 36:00:00 \
+			--time 24:00:00 \
 			--cpus-per-task 16 \
-			-e ${SLURM_LOGS}/11.reduce-filtered-%A.err \
-			-o ${SLURM_LOGS}/11.reduce-filtered-%A.out \
+			-o ${SLURM_LOGS}/11.reduce-filtered-%A.log \
 			${SCRIPTS}/11.reduce-filtered ${output_file} ${batch_lists[@]}
 	fi
 fi

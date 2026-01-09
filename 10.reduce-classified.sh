@@ -20,7 +20,9 @@ for collection in $collections; do
 	batch_lists+=( $batch_list )
 done
 
-output_file="${DATA_CLEANING}/${TARGET_LANG}-${lang}/${TARGET_LANG%~*}-${lang%~*}.${collection_hash}.classified.gz"
+mkdir -p $DATA_CLEANING
+output_file="${DATA_CLEANING}/${lang}-${TARGET_LANG}/${lang%~*}-${TARGET_LANG%~*}.${collection_hash}.classified.gz"
+output_file_docs="${output_file/classified.gz/docs.gz}"
 
 if [ ! -f $output_file ] || ! $RETRY; then
 	prompt "Scheduling 1-1 for combining $batch_count batches across ${#batch_lists[@]} collections\n"
@@ -29,8 +31,13 @@ if [ ! -f $output_file ] || ! $RETRY; then
 			-J reduce-classified-${lang%~*} \
 			--time 24:00:00 \
 			--cpus-per-task 1 \
-			-e ${SLURM_LOGS}/10.reduce-classified-%A.err \
-			-o ${SLURM_LOGS}/10.reduce-classified-%A.out \
+			-o ${SLURM_LOGS}/10.reduce-classified-%A.log \
 			${SCRIPTS}/10.reduce-classified ${lang%~*} ${output_file} ${batch_lists[@]}
+		schedule \
+			-J reduce-docs-${lang%~*} \
+			--time 24:00:00 \
+			--cpus-per-task 1 \
+			-o ${SLURM_LOGS}/10.reduce-docs-%A.log \
+			${SCRIPTS}/10.reduce-docs ${lang%~*} ${output_file_docs} ${batch_lists[@]}
 	fi
 fi

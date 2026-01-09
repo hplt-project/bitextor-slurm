@@ -8,8 +8,8 @@ target_lang_data=$3
 batch=$4
 shard=$(basename $(dirname $batch))
 
-export HF_DATASETS_OFFLINE=1
-export TRANSFORMERS_OFFLINE=1
+#export HF_DATASETS_OFFLINE=1
+#export TRANSFORMERS_OFFLINE=1
 TMPSFX=${JOB_ID:-$$}
 HARDRULED=$batch/hardruled.gz
 FIXED=$batch/fixed.gz
@@ -20,9 +20,9 @@ test -r $FIXED
 test -r $HARDRULED
 
 paste <(zcat $FIXED) <(zcat $HARDRULED) \
-| cache -k 3,4 ./score-wrap.py $BICLEANER $BICLEANER_PARAMS \
+| LD_LIBRARY_PATH=/opt/rocm/lib cache -k 3,4 ./score-wrap.py $BICLEANER $BICLEANER_PARAMS \
 	--score_only \
-	--processes $THREADS \
+	--scol 4 --tcol 3 \
 	--tmp_dir $TMPDIR \
 	--disable_hardrules \
 	--disable_porn_removal \

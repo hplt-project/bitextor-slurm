@@ -57,13 +57,27 @@ if [ ! -z "${SCRATCH:-}" ]; then
 	trap cleanup EXIT
 fi
 
+MOUNT_ROCM=""
+if [ "$IS_LUMI" = true ] && env | grep -qi gpu; then
+	module load rocm
+	MOUNT_ROCM="-B /opt/rocm/lib"
+fi
+
 GROUP_END=$(( $TASKS_PER_BATCH * $SLURM_ARRAY_TASK_ID ))
 GROUP_START=$(( $GROUP_END - $TASKS_PER_BATCH ))
 
-echo "Processing $GROUP_START to $GROUP_END with $THREADS threads"
+echo "Processing $GROUP_START to $GROUP_END in ${SLURM_TASKS_PER_NODE} parallel jobs each with $THREADS threads"
 
 awk "NR > $GROUP_START && NR <= $GROUP_END" $BATCHES \
-| parallel \
+| singularity exec \
+    $MOUNT_ROCM \
+    -B $(pwd -P) \
+    -B $COLLECTION_ROOT \
+    -B $HF_HUB_CACHE \
+    --pwd $(pwd -P) \
+    bitextor-slurm.sif \
+parallel \
+	--will-cite \
 	-j${SLURM_TASKS_PER_NODE} \
 	--line-buffer \
 	--colsep $'\t' \

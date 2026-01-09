@@ -1,0 +1,2 @@
+bootstrap: docker-daemon
+from: bitextor-slurm:latest

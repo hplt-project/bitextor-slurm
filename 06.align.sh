@@ -27,10 +27,10 @@ function make_batch_list_retry {
 	batch_list=${COLLECTIONS[$collection]}-batches/06.${lang}-${TARGET_LANG}.$(date '+%Y%m%d%H%M%S')
 
 	cat `make_batch_list_all "$@"` | while read SRC_BATCH REF_BATCH; do
-		alignments=$SRC_BATCH/aligned-$(basename $REF_BATCH).gz
+		alignments=$SRC_BATCH/aligned.gz
 		# either if the alignments doesn't exist, or the tokenised_en.gz file is newer than aligned-n.gz
 		if [[ ! -e $alignments ]] || [[ $SRC_BATCH/tokenised_${TARGET_LANG%~*}.gz -nt $alignments ]]; then
-			echo $alignments 1>&2
+			printf '%s\t%s\n' "$alignments" "$REF_BATCH" 1>&2
 			printf '%s\t%s\n' "$SRC_BATCH" "$REF_BATCH"
 		fi
 	done | shuf > $batch_list
@@ -38,19 +38,34 @@ function make_batch_list_retry {
 	echo $batch_list
 }
 
-declare -a OPTIONS=(
-	--time 12:00:00
-	--cpus-per-task 4
-	-e ${SLURM_LOGS}/06.align-%A_%a.err
-	-o ${SLURM_LOGS}/06.align-%A_%a.out
-)
+function make_batch_list_reduce {
+	local step="$1" collection="$2" lang="$3"
+	local batch_list=${COLLECTIONS[$collection]}-batches/${step}.${lang}
 
-# Quick hack, should be a --option option, but functions.sh doesn't
-# allow for that at the moment. Someday...
-if [[ ! -z ${OOM_PROOF:-} ]]; then
-	OPTIONS+=(--mem-per-cpu 12G)
-	export BLEUALIGN_THREADS=4
-fi
+	if [[ ! -d ${COLLECTIONS[$collection]}-batches ]]; then
+		mkdir ${COLLECTIONS[$collection]}-batches
+	fi
+
+	if $FORCE_INDEX_BATCHES || [[ ! -f ${COLLECTIONS[$collection]}-batches/${lang} ]]; then
+		find ${COLLECTIONS[$collection]}-shards/${lang} \
+			-mindepth 2 \
+			-maxdepth 2 \
+			-type d \
+			-regex '.*/[0-9]+/[0-9]+' \
+			> ${COLLECTIONS[$collection]}-batches/${lang}
+	fi
+
+	rm -f ${batch_list}
+	ln -s ${COLLECTIONS[$collection]}-batches/${lang} ${batch_list}
+
+	echo ${batch_list}
+}
+
+declare -a OPTIONS=(
+	--time 24:00:00
+	--cpus-per-task 4
+	-o ${SLURM_LOGS}/06.align-%A_%a.log
+)
 
 collection=$1
 shift
@@ -58,15 +73,27 @@ shift
 for lang in $*; do
 	batch_list=`make_batch_list $collection $lang`
 	job_list=`make_job_list $batch_list`
+	batch_list_reduce=`make_batch_list_reduce 06 $collection $lang`
+	job_list_reduce=`make_job_list $batch_list_reduce`
 	if [ ! -z $job_list ]; then
 		prompt "Scheduling $job_list\n"
 		if confirm; then
-			schedule \
+			align_job_id=$(schedule \
 				-J align-${lang%~*}-${collection} \
 				-a $job_list \
+				--parsable \
 				${OPTIONS[@]} \
 				${SCRIPTS}/generic.slurm $batch_list \
-				${SCRIPTS}/06.align ${lang%~*}
+				${SCRIPTS}/06.align ${lang%~*})
+
+			schedule \
+				-J reduce-align-${lang%~*}-${collection} \
+				-a $job_list_reduce \
+				--dependency afterok:$align_job_id \
+				--time 24:00:00 --cpus-per-task 1 \
+				-o ${SLURM_LOGS}/06.reduce-align-%A_%a.log \
+				${SCRIPTS}/generic.slurm $batch_list_reduce \
+				${SCRIPTS}/06.reduce-align ${lang%~*}
 		fi
 	fi
 done
