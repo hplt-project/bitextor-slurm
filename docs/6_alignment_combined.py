@@ -14,6 +14,8 @@ from typing import Dict, List, Tuple, Optional, NamedTuple, Set
 import math
 import atexit
 import os
+import sqlite3
+import tempfile
 
 # --- Configuration ---
 logging.basicConfig(
@@ -47,33 +49,52 @@ class SentenceAlignment(NamedTuple):
     tgt_para_id: str
     scores: AlignmentScores
 
+# --- Shared Globals (paths to SQLite databases) ---
+shared_src_db_path: Optional[Path] = None
+shared_tgt_db_path: Optional[Path] = None
+
 # --- Worker-Specific Globals ---
-worker_src_zip_file: Optional[ZipFile] = None
-worker_tgt_zip_file: Optional[ZipFile] = None
+worker_src_zip_path: Optional[Path] = None
+worker_tgt_zip_path: Optional[Path] = None
 worker_src_document_cache: Optional[Dict[str, bytes]] = None
 worker_tgt_document_cache: Optional[Dict[str, bytes]] = None
-worker_src_doc_versions: Optional[Dict[str, List[str]]] = None
-worker_tgt_doc_versions: Optional[Dict[str, List[str]]] = None
+worker_src_db_conn: Optional[sqlite3.Connection] = None
+worker_tgt_db_conn: Optional[sqlite3.Connection] = None
+
+# --- Cache Statistics ---
+worker_cache_stats: Optional[Dict[str, int]] = None
 
 def worker_initializer(src_zip_path: Path, tgt_zip_path: Path):
     """
-    Initialize each worker. Each worker now performs its own ZIP scan.
+    Initialize each worker. Connects to shared SQLite databases for doc version lookups.
+    ZipFiles are opened on-demand to avoid loading 88M-entry central directories per worker.
     """
-    global worker_src_zip_file, worker_tgt_zip_file
+    global worker_src_zip_path, worker_tgt_zip_path
     global worker_src_document_cache, worker_tgt_document_cache
-    global worker_src_doc_versions, worker_tgt_doc_versions 
+    global worker_src_db_conn, worker_tgt_db_conn
+    global worker_cache_stats
 
     try:
-        # Initialize file handles and caches
-        worker_src_zip_file = ZipFile(src_zip_path, 'r')
-        worker_tgt_zip_file = ZipFile(tgt_zip_path, 'r')
+        # Store paths - ZipFiles will be opened on-demand to save memory
+        worker_src_zip_path = src_zip_path
+        worker_tgt_zip_path = tgt_zip_path
         worker_src_document_cache = {}
         worker_tgt_document_cache = {}
 
-        logger.info(f"Worker {mp.current_process().pid}: Scanning source ZIP...")
-        worker_src_doc_versions = scan_zip_for_documents(worker_src_zip_file)
-        logger.info(f"Worker {mp.current_process().pid}: Scanning target ZIP...")
-        worker_tgt_doc_versions = scan_zip_for_documents(worker_tgt_zip_file)
+        # Connect to SQLite databases (read-only, shared cache for efficiency)
+        worker_src_db_conn = sqlite3.connect(f"file:{shared_src_db_path}?mode=ro", uri=True)
+        worker_tgt_db_conn = sqlite3.connect(f"file:{shared_tgt_db_path}?mode=ro", uri=True)
+
+        # Initialize cache statistics
+        worker_cache_stats = {
+            'src_hits': 0,
+            'src_misses': 0,
+            'tgt_hits': 0,
+            'tgt_misses': 0,
+            'src_fast_path': 0,  # single-version, no read needed
+            'tgt_fast_path': 0,
+        }
+
         logger.info(f"Worker {mp.current_process().pid} initialized successfully.")
 
         atexit.register(worker_cleanup)
@@ -83,14 +104,40 @@ def worker_initializer(src_zip_path: Path, tgt_zip_path: Path):
         raise
 
 def worker_cleanup():
-    """Clean up worker resources (file handles) when a process terminates."""
-    global worker_src_zip_file, worker_tgt_zip_file
+    """Clean up worker resources when a process terminates."""
+    global worker_cache_stats, worker_src_db_conn, worker_tgt_db_conn
     try:
-        if worker_src_zip_file:
-            worker_src_zip_file.close()
-        if worker_tgt_zip_file:
-            worker_tgt_zip_file.close()
-        logger.debug(f"Worker {mp.current_process().pid} cleaned up ZIP handles.")
+        # Log cache statistics before cleanup
+        if worker_cache_stats:
+            pid = mp.current_process().pid
+            src_total = worker_cache_stats['src_hits'] + worker_cache_stats['src_misses']
+            tgt_total = worker_cache_stats['tgt_hits'] + worker_cache_stats['tgt_misses']
+            src_hit_rate = (worker_cache_stats['src_hits'] / src_total * 100) if src_total > 0 else 0
+            tgt_hit_rate = (worker_cache_stats['tgt_hits'] / tgt_total * 100) if tgt_total > 0 else 0
+
+            # Calculate cache sizes
+            src_cache_size = len(worker_src_document_cache) if worker_src_document_cache else 0
+            tgt_cache_size = len(worker_tgt_document_cache) if worker_tgt_document_cache else 0
+            src_cache_bytes = sum(len(v) for v in worker_src_document_cache.values() if v) if worker_src_document_cache else 0
+            tgt_cache_bytes = sum(len(v) for v in worker_tgt_document_cache.values() if v) if worker_tgt_document_cache else 0
+
+            logger.info(
+                f"Worker {pid} cache stats: "
+                f"SRC[hits={worker_cache_stats['src_hits']}, misses={worker_cache_stats['src_misses']}, "
+                f"hit_rate={src_hit_rate:.1f}%, fast_path={worker_cache_stats['src_fast_path']}, "
+                f"cached_docs={src_cache_size}, cache_MB={src_cache_bytes/1024/1024:.1f}] "
+                f"TGT[hits={worker_cache_stats['tgt_hits']}, misses={worker_cache_stats['tgt_misses']}, "
+                f"hit_rate={tgt_hit_rate:.1f}%, fast_path={worker_cache_stats['tgt_fast_path']}, "
+                f"cached_docs={tgt_cache_size}, cache_MB={tgt_cache_bytes/1024/1024:.1f}]"
+            )
+
+        # Close SQLite connections
+        if worker_src_db_conn:
+            worker_src_db_conn.close()
+        if worker_tgt_db_conn:
+            worker_tgt_db_conn.close()
+
+        logger.debug(f"Worker {mp.current_process().pid} cleanup complete.")
     except Exception as e:
         logger.debug(f"Error during worker cleanup in {mp.current_process().pid}: {e}")
 
@@ -185,33 +232,115 @@ def extract_scores_from_tu(tu: ET.Element) -> List[AlignmentScores]:
         for a, b, f in zip(aligner_scores, bicleaner_scores, bifixer_scores)
     ]
 
-def scan_zip_for_documents(zip_file: ZipFile) -> Dict[str, List[str]]:
+def scan_zip_to_sqlite_via_unzip(zip_path: Path, db_path: Path) -> int:
     """
-    Scans a zip file and creates a mapping of base filenames to their full versioned paths.
+    Scans a zip file using 'unzip -l' command (avoids loading 88M entries into Python memory)
+    and creates a SQLite database mapping base filenames to versioned paths.
+    Returns the number of unique base documents.
     """
-    doc_versions = defaultdict(list)
-    for filename in tqdm(zip_file.namelist(), desc=f"Scanning {os.path.basename(zip_file.filename)}", leave=False):
-        if filename.endswith('.xml'):
-            base = re.sub(r'_(\d+)\.xml$', '.xml', filename)
-            doc_versions[base].append(filename)
-    return doc_versions
+    import subprocess
+
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+
+    # Create table
+    cursor.execute('''
+        CREATE TABLE doc_versions (
+            base_name TEXT NOT NULL,
+            version_path TEXT NOT NULL
+        )
+    ''')
+
+    # Use unzip -l to list files (streams output, doesn't load all into memory)
+    logger.info(f"Listing files in {zip_path.name} via unzip command...")
+    proc = subprocess.Popen(
+        ['unzip', '-l', str(zip_path)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True
+    )
+
+    batch = []
+    batch_size = 100000
+    line_count = 0
+    xml_count = 0
+
+    # Parse unzip -l output: "  length  date  time  name"
+    # Skip header lines, extract filename from each line
+    for line in proc.stdout:
+        line_count += 1
+        # Skip header/footer lines (first 3 and last 2 typically)
+        parts = line.strip().split()
+        if len(parts) >= 4:
+            filename = parts[-1]  # Last column is the filename
+            if filename.endswith('.xml'):
+                xml_count += 1
+                base = re.sub(r'_(\d+)\.xml$', '.xml', filename)
+                batch.append((base, filename))
+
+                if len(batch) >= batch_size:
+                    cursor.executemany('INSERT INTO doc_versions VALUES (?, ?)', batch)
+                    batch = []
+
+        # Progress indicator every 1M lines
+        if line_count % 1000000 == 0:
+            logger.info(f"  Processed {line_count:,} lines, {xml_count:,} XML files...")
+
+    proc.wait()
+
+    # Insert remaining
+    if batch:
+        cursor.executemany('INSERT INTO doc_versions VALUES (?, ?)', batch)
+
+    logger.info(f"Total: {xml_count:,} XML files from {line_count:,} entries")
+
+    # Create index after bulk insert (faster)
+    logger.info("Creating database index...")
+    cursor.execute('CREATE INDEX idx_base_name ON doc_versions(base_name)')
+
+    conn.commit()
+
+    # Count unique base names
+    cursor.execute('SELECT COUNT(DISTINCT base_name) FROM doc_versions')
+    unique_count = cursor.fetchone()[0]
+
+    conn.close()
+    return unique_count
 
 def get_cached_document_content(xml_path: str, lang: str) -> Optional[bytes]:
     """
     Gets document content using the worker-local caching strategy for the specified language.
+    Uses unzip command to extract single files without loading full central directory.
     """
+    import subprocess
+
     cache = worker_src_document_cache if lang == 'src' else worker_tgt_document_cache
-    zip_file = worker_src_zip_file if lang == 'src' else worker_tgt_zip_file
-    
+    zip_path = worker_src_zip_path if lang == 'src' else worker_tgt_zip_path
+    hit_key = f'{lang}_hits'
+    miss_key = f'{lang}_misses'
+
     if xml_path in cache:
+        worker_cache_stats[hit_key] += 1
         return cache[xml_path]
-    
+
+    worker_cache_stats[miss_key] += 1
     try:
-        with zip_file.open(xml_path) as f:
-            content = f.read()
+        # Use unzip -p to extract to stdout - avoids loading 88M-entry central directory
+        result = subprocess.run(
+            ['unzip', '-p', str(zip_path), xml_path],
+            capture_output=True,
+            timeout=30
+        )
+        if result.returncode == 0:
+            content = result.stdout
             cache[xml_path] = content
             return content
-    except KeyError:
+        else:
+            # File not found or other error
+            cache[xml_path] = None
+            return None
+    except subprocess.TimeoutExpired:
+        logger.warning(f"Timeout extracting {xml_path} from {zip_path}")
         cache[xml_path] = None
         return None
     except Exception as e:
@@ -251,23 +380,32 @@ def get_document_sentences(doc_tree: ET.ElementTree, para_info: List[Dict]) -> L
     
     return matches
 
+def get_document_versions_from_db(base_path: str, lang: str) -> List[str]:
+    """Query SQLite database for document versions."""
+    db_conn = worker_src_db_conn if lang == 'src' else worker_tgt_db_conn
+    cursor = db_conn.cursor()
+    cursor.execute('SELECT version_path FROM doc_versions WHERE base_name = ?', (base_path,))
+    return [row[0] for row in cursor.fetchall()]
+
 def get_document_matches_optimized(
-    base_path: str, 
-    lang: str, 
+    base_path: str,
+    lang: str,
     para_info: List[Dict]
 ) -> List[Tuple[str, List[str]]]:
     """
     CRITICAL OPTIMIZATION: Get matches for a document, avoiding parsing when possible.
     """
-    doc_versions = worker_src_doc_versions if lang == 'src' else worker_tgt_doc_versions
+    fast_path_key = f'{lang}_fast_path'
 
     all_matches = []
-    versions = doc_versions.get(base_path, [])
-    
+    versions = get_document_versions_from_db(base_path, lang)
+
     if not versions:
         return all_matches
-    
+
     if len(versions) == 1:
+        # Fast path: single version, no need to read/parse XML
+        worker_cache_stats[fast_path_key] += 1
         matches = [
             f"{p['paragraph_num']}.{p['sentence_num']}"
             for p in para_info if p
@@ -275,7 +413,8 @@ def get_document_matches_optimized(
         if matches:
             all_matches.append((versions[0], matches))
         return all_matches
-    
+
+    # Slow path: multiple versions, must read and parse to find correct one
     for version_path in versions:
         content = get_cached_document_content(version_path, lang)
         if content:
@@ -284,7 +423,7 @@ def get_document_matches_optimized(
                 matches = get_document_sentences(doc_tree, para_info)
                 if matches:
                     all_matches.append((version_path, matches))
-    
+
     return all_matches
 
 def process_alignment_batch(
@@ -513,8 +652,28 @@ def verify_alignments(folder: str, output: str, num_cpus: int, batch_size: int):
     total_tus = count_total_tus(tmx_file)
     total_batches = math.ceil(total_tus / batch_size) if total_tus > 0 else None
 
-    logger.info(f"Initializing Smart Worker pool with {num_cpus} CPUs...")
-    pool = mp.Pool(num_cpus, initializer=worker_initializer, initargs=(src_docs_zip, tgt_docs_zip))
+    # Create SQLite databases for doc versions (avoids 100GB+ in-memory dicts)
+    global shared_src_db_path, shared_tgt_db_path
+
+    # Create temp directory for databases
+    temp_dir = Path(tempfile.mkdtemp(prefix='alignment_db_'))
+    shared_src_db_path = temp_dir / 'src_doc_versions.db'
+    shared_tgt_db_path = temp_dir / 'tgt_doc_versions.db'
+
+    logger.info(f"Creating SQLite databases in {temp_dir}")
+
+    # Scan ZIPs using unzip command (avoids loading 88M entries into Python memory)
+    logger.info("Building SQLite index for source documents...")
+    src_unique_count = scan_zip_to_sqlite_via_unzip(src_docs_zip, shared_src_db_path)
+    logger.info(f"Found {src_unique_count:,} unique source documents")
+
+    logger.info("Building SQLite index for target documents...")
+    tgt_unique_count = scan_zip_to_sqlite_via_unzip(tgt_docs_zip, shared_tgt_db_path)
+    logger.info(f"Found {tgt_unique_count:,} unique target documents")
+
+    logger.info(f"Initializing worker pool with {num_cpus} CPUs...")
+    pool = mp.Pool(num_cpus, initializer=worker_initializer,
+                   initargs=(src_docs_zip, tgt_docs_zip))
     
     try:
         # process_func uses the original src_lang and tgt_lang to find the right data in the TMX
@@ -566,8 +725,13 @@ def verify_alignments(folder: str, output: str, num_cpus: int, batch_size: int):
         pool.join()
         logger.info("Worker pool shutdown complete.")
 
+        # Cleanup temp SQLite databases
+        import shutil
+        if temp_dir.exists():
+            logger.info(f"Cleaning up temp directory: {temp_dir}")
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
     logger.info("Script completed successfully.")
-    import os
     os._exit(0)
 
 if __name__ == "__main__":
