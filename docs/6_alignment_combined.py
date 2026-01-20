@@ -430,10 +430,13 @@ def process_alignment_batch(
     batch: List[ET.Element],
     src_lang: str,
     tgt_lang: str
-) -> Dict[Tuple[str, str], List[Tuple[List[str], List[str], AlignmentScores]]]:
+) -> Tuple[Dict[Tuple[str, str], List[Tuple[List[str], List[str], AlignmentScores]]], Dict[str, int]]:
     """
     Processes a batch of <tu> elements using worker-local resources.
     """
+    # Snapshot stats at start to compute delta for this batch only
+    stats_before = dict(worker_cache_stats) if worker_cache_stats else {}
+
     local_doc_alignments = defaultdict(list)
     seen_alignments = defaultdict(set)
     
@@ -486,8 +489,14 @@ def process_alignment_batch(
 
     for alignments in local_doc_alignments.values():
         alignments.sort(key=lambda x: tuple(map(int, x[0][0].split('.'))))
-    
-    return local_doc_alignments
+
+    # Return alignments and delta stats for this batch only
+    stats_after = dict(worker_cache_stats) if worker_cache_stats else {}
+    stats_delta = {
+        key: stats_after.get(key, 0) - stats_before.get(key, 0)
+        for key in ['src_hits', 'src_misses', 'src_fast_path', 'tgt_hits', 'tgt_misses', 'tgt_fast_path']
+    }
+    return local_doc_alignments, stats_delta
 
 def merge_results(
     results: List[Dict[Tuple[str, str], list]], 
@@ -589,7 +598,7 @@ def count_total_tus(tmx_file_path: Path) -> int:
     count = 0
     try:
         with gzip.open(tmx_file_path, 'rt', encoding='utf-8', errors='ignore') as f:
-            for event, elem in ET.iterparse(f, events=('end',)):
+            for event, elem in tqdm(ET.iterparse(f, events=('end',))):
                 if elem.tag == 'tu':
                     count += 1
                 elem.clear()
@@ -682,19 +691,41 @@ def verify_alignments(folder: str, output: str, num_cpus: int, batch_size: int):
                                tgt_lang=tgt_lang)
         
         batch_results = []
+        aggregated_stats = {
+            'src_hits': 0, 'src_misses': 0, 'src_fast_path': 0,
+            'tgt_hits': 0, 'tgt_misses': 0, 'tgt_fast_path': 0,
+        }
+
         with gzip.open(tmx_file, 'rt', encoding='utf-8', errors='ignore') as f:
             context = ET.iterparse(f, events=('end',))
             tu_iterator = (elem for _, elem in context if elem.tag == 'tu')
             batches = chunk_iterator(tu_iterator, batch_size)
-            
+
             logger.info(f"Processing {total_tus:,} TUs in {total_batches or 'unknown'} batches of size {batch_size}...")
-            
+
             results_iterator = pool.imap_unordered(process_func, batches)
-            
+
             pbar = tqdm(results_iterator, desc="Processing TMX batches", total=total_batches, unit="batch")
             for result in pbar:
                 if result:
-                    batch_results.append(result)
+                    alignments, stats = result
+                    batch_results.append(alignments)
+                    # Aggregate stats
+                    for key in aggregated_stats:
+                        aggregated_stats[key] += stats.get(key, 0)
+
+        # Log aggregated cache statistics
+        src_total = aggregated_stats['src_hits'] + aggregated_stats['src_misses']
+        tgt_total = aggregated_stats['tgt_hits'] + aggregated_stats['tgt_misses']
+        src_hit_rate = (aggregated_stats['src_hits'] / src_total * 100) if src_total > 0 else 0
+        tgt_hit_rate = (aggregated_stats['tgt_hits'] / tgt_total * 100) if tgt_total > 0 else 0
+        logger.info(
+            f"Cache stats (aggregated): "
+            f"SRC[hits={aggregated_stats['src_hits']:,}, misses={aggregated_stats['src_misses']:,}, "
+            f"hit_rate={src_hit_rate:.1f}%, fast_path={aggregated_stats['src_fast_path']:,}] "
+            f"TGT[hits={aggregated_stats['tgt_hits']:,}, misses={aggregated_stats['tgt_misses']:,}, "
+            f"hit_rate={tgt_hit_rate:.1f}%, fast_path={aggregated_stats['tgt_fast_path']:,}]"
+        )
 
         logger.info("Aggregating results to find all unique document pairs...")
         all_doc_pairs = sorted(set(
