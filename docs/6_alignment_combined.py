@@ -66,8 +66,8 @@ worker_cache_stats: Optional[Dict[str, int]] = None
 
 def worker_initializer(src_zip_path: Path, tgt_zip_path: Path):
     """
-    Initialize each worker. Connects to shared SQLite databases for doc version lookups.
-    ZipFiles are opened on-demand to avoid loading 88M-entry central directories per worker.
+    Initialize each worker. Stores ZIP paths and connects to SQLite databases.
+    Documents are extracted on-demand using batch pre-fetch.
     """
     global worker_src_zip_path, worker_tgt_zip_path
     global worker_src_document_cache, worker_tgt_document_cache
@@ -75,9 +75,10 @@ def worker_initializer(src_zip_path: Path, tgt_zip_path: Path):
     global worker_cache_stats
 
     try:
-        # Store paths - ZipFiles will be opened on-demand to save memory
+        # Store paths - documents will be batch extracted per batch
         worker_src_zip_path = src_zip_path
         worker_tgt_zip_path = tgt_zip_path
+
         worker_src_document_cache = {}
         worker_tgt_document_cache = {}
 
@@ -98,7 +99,7 @@ def worker_initializer(src_zip_path: Path, tgt_zip_path: Path):
         logger.info(f"Worker {mp.current_process().pid} initialized successfully.")
 
         atexit.register(worker_cleanup)
-      
+
     except Exception as e:
         logger.error(f"Failed to initialize worker {mp.current_process().pid}: {e}")
         raise
@@ -140,6 +141,86 @@ def worker_cleanup():
         logger.debug(f"Worker {mp.current_process().pid} cleanup complete.")
     except Exception as e:
         logger.debug(f"Error during worker cleanup in {mp.current_process().pid}: {e}")
+
+def batch_extract_to_cache(files: Set[str], zip_path: Path, cache: Dict[str, bytes]):
+    """
+    Extract multiple files from a ZIP using unzip command and populate cache.
+    Uses temp directory and processes in chunks to handle command line limits.
+    Each unzip call scans the central directory once and extracts all requested files.
+    """
+    import subprocess
+
+    if not files:
+        return
+
+    # Filter out files already in cache
+    files_to_extract = [f for f in files if f not in cache]
+    if not files_to_extract:
+        return
+
+    # Chunk size based on command line limits (~128KB safe, avg filename ~60 chars)
+    chunk_size = 1500
+
+    for i in range(0, len(files_to_extract), chunk_size):
+        chunk = files_to_extract[i:i+chunk_size]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # -j: junk paths (extract flat)
+            # -o: overwrite without prompting
+            # -q: quiet
+            cmd = ['unzip', '-j', '-o', '-q', '-d', tmpdir, str(zip_path)] + chunk
+            try:
+                subprocess.run(cmd, capture_output=True, timeout=600, check=False)
+            except subprocess.TimeoutExpired:
+                logger.warning(f"Timeout during batch extraction of {len(chunk)} files from {zip_path.name}")
+
+            # Read extracted files into cache
+            for filename in chunk:
+                # Handle both flat filenames and paths
+                basename = os.path.basename(filename) if '/' in filename else filename
+                filepath = os.path.join(tmpdir, basename)
+                try:
+                    with open(filepath, 'rb') as f:
+                        cache[filename] = f.read()
+                except FileNotFoundError:
+                    cache[filename] = None
+
+def collect_batch_file_requirements(
+    batch: List[ET.Element],
+    src_lang: str,
+    tgt_lang: str
+) -> Tuple[Set[str], Set[str]]:
+    """
+    Pre-scan a batch to collect all document files that need to be extracted.
+    Only includes files for documents with multiple versions (single-version uses fast path).
+    Returns (src_files_to_extract, tgt_files_to_extract).
+    """
+    src_files: Set[str] = set()
+    tgt_files: Set[str] = set()
+
+    for tu in batch:
+        src_tuv = tu.find(f".//tuv[@{{{XML_NS['xml']}}}lang='{src_lang}']")
+        tgt_tuv = tu.find(f".//tuv[@{{{XML_NS['xml']}}}lang='{tgt_lang}']")
+
+        if src_tuv is None or tgt_tuv is None:
+            continue
+
+        src_doc_info_list = extract_document_info_from_tuv(src_tuv)
+        tgt_doc_info_list = extract_document_info_from_tuv(tgt_tuv)
+
+        for src_doc_url, _, _ in src_doc_info_list:
+            base_path = sanitize_url_to_filename(src_doc_url)
+            versions = get_document_versions_from_db(base_path, 'src')
+            if len(versions) > 1:  # Only need to extract if multiple versions
+                src_files.update(versions)
+
+        for tgt_doc_url, _, _ in tgt_doc_info_list:
+            base_path = sanitize_url_to_filename(tgt_doc_url)
+            versions = get_document_versions_from_db(base_path, 'tgt')
+            if len(versions) > 1:  # Only need to extract if multiple versions
+                tgt_files.update(versions)
+
+    return src_files, tgt_files
 
 def sanitize_url_to_filename(url: str) -> str:
     """
@@ -309,13 +390,10 @@ def scan_zip_to_sqlite_via_unzip(zip_path: Path, db_path: Path) -> int:
 
 def get_cached_document_content(xml_path: str, lang: str) -> Optional[bytes]:
     """
-    Gets document content using the worker-local caching strategy for the specified language.
-    Uses unzip command to extract single files without loading full central directory.
+    Gets document content from the worker-local cache.
+    Cache should be pre-populated by batch_extract_to_cache before calling this.
     """
-    import subprocess
-
     cache = worker_src_document_cache if lang == 'src' else worker_tgt_document_cache
-    zip_path = worker_src_zip_path if lang == 'src' else worker_tgt_zip_path
     hit_key = f'{lang}_hits'
     miss_key = f'{lang}_misses'
 
@@ -323,30 +401,9 @@ def get_cached_document_content(xml_path: str, lang: str) -> Optional[bytes]:
         worker_cache_stats[hit_key] += 1
         return cache[xml_path]
 
+    # Cache miss - file wasn't pre-fetched (shouldn't happen often)
     worker_cache_stats[miss_key] += 1
-    try:
-        # Use unzip -p to extract to stdout - avoids loading 88M-entry central directory
-        result = subprocess.run(
-            ['unzip', '-p', str(zip_path), xml_path],
-            capture_output=True,
-            timeout=30
-        )
-        if result.returncode == 0:
-            content = result.stdout
-            cache[xml_path] = content
-            return content
-        else:
-            # File not found or other error
-            cache[xml_path] = None
-            return None
-    except subprocess.TimeoutExpired:
-        logger.warning(f"Timeout extracting {xml_path} from {zip_path}")
-        cache[xml_path] = None
-        return None
-    except Exception as e:
-        logger.error(f"Worker {mp.current_process().pid} error reading {xml_path}: {e}")
-        cache[xml_path] = None
-        return None
+    return None
 
 def parse_xml_from_content(content: Optional[bytes]) -> Optional[ET.ElementTree]:
     """Safely parses XML content from bytes into an ElementTree."""
@@ -433,13 +490,24 @@ def process_alignment_batch(
 ) -> Tuple[Dict[Tuple[str, str], List[Tuple[List[str], List[str], AlignmentScores]]], Dict[str, int]]:
     """
     Processes a batch of <tu> elements using worker-local resources.
+    Uses batch pre-fetch to extract all needed files upfront.
     """
     # Snapshot stats at start to compute delta for this batch only
     stats_before = dict(worker_cache_stats) if worker_cache_stats else {}
 
+    # Phase 1: Collect all files needed for this batch and extract them
+    src_files_needed, tgt_files_needed = collect_batch_file_requirements(batch, src_lang, tgt_lang)
+
+    # Batch extract to cache (one unzip call per ~1500 files)
+    if src_files_needed:
+        batch_extract_to_cache(src_files_needed, worker_src_zip_path, worker_src_document_cache)
+    if tgt_files_needed:
+        batch_extract_to_cache(tgt_files_needed, worker_tgt_zip_path, worker_tgt_document_cache)
+
+    # Phase 2: Process the batch using cached content
     local_doc_alignments = defaultdict(list)
     seen_alignments = defaultdict(set)
-    
+
     for tu in batch:
         src_tuv = tu.find(f".//tuv[@{{{XML_NS['xml']}}}lang='{src_lang}']")
         tgt_tuv = tu.find(f".//tuv[@{{{XML_NS['xml']}}}lang='{tgt_lang}']")
@@ -489,6 +557,10 @@ def process_alignment_batch(
 
     for alignments in local_doc_alignments.values():
         alignments.sort(key=lambda x: tuple(map(int, x[0][0].split('.'))))
+
+    # Clear caches to free memory before next batch
+    worker_src_document_cache.clear()
+    worker_tgt_document_cache.clear()
 
     # Return alignments and delta stats for this batch only
     stats_after = dict(worker_cache_stats) if worker_cache_stats else {}
