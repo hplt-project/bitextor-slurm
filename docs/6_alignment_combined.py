@@ -570,30 +570,114 @@ def process_alignment_batch(
     }
     return local_doc_alignments, stats_delta
 
-def merge_results(
-    results: List[Dict[Tuple[str, str], list]], 
-    all_doc_pairs: List[Tuple[str, str]]
-) -> List[Tuple[Tuple[str, str], list]]:
-    """Merges results from all worker batches into a final, sorted list."""
-    logger.info("Merging results from all worker batches...")
-    final_alignments = defaultdict(list)
-    seen_alignments = defaultdict(set)
+def create_alignments_database(db_path: Path) -> sqlite3.Connection:
+    """Create a SQLite database for storing alignments with deduplication."""
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
 
-    for result_batch in tqdm(results, desc="Merging batches"):
-        for doc_pair, alignments in result_batch.items():
-            for alignment in alignments:
-                src_key = tuple(sorted(alignment[0]))
-                tgt_key = tuple(sorted(alignment[1]))
-                align_key = (src_key, tgt_key)
-                
-                if align_key not in seen_alignments[doc_pair]:
-                    final_alignments[doc_pair].append(alignment)
-                    seen_alignments[doc_pair].add(align_key)
+    cursor.execute('''
+        CREATE TABLE alignments (
+            id INTEGER PRIMARY KEY,
+            src_doc TEXT NOT NULL,
+            tgt_doc TEXT NOT NULL,
+            src_sents TEXT NOT NULL,
+            tgt_sents TEXT NOT NULL,
+            aligner_score TEXT,
+            bicleaner_score TEXT,
+            bifixer_score TEXT,
+            sort_key TEXT NOT NULL
+        )
+    ''')
 
-    for doc_pair in final_alignments:
-        final_alignments[doc_pair].sort(key=lambda x: tuple(map(int, x[0][0].split('.'))))
-    
-    return [(pair, final_alignments[pair]) for pair in all_doc_pairs]
+    # Unique constraint for deduplication (using sorted sentence IDs)
+    cursor.execute('''
+        CREATE UNIQUE INDEX idx_unique_alignment
+        ON alignments(src_doc, tgt_doc, src_sents, tgt_sents)
+    ''')
+
+    conn.commit()
+    return conn
+
+
+def insert_batch_results_to_db(conn: sqlite3.Connection, batch_results: Dict[Tuple[str, str], list]):
+    """Insert a batch of alignment results into the database, ignoring duplicates."""
+    cursor = conn.cursor()
+
+    rows = []
+    for (src_doc, tgt_doc), alignments in batch_results.items():
+        for src_sents, tgt_sents, scores in alignments:
+            # Create sort key from first sentence ID for ordering
+            sort_key = '.'.join(f'{int(x):010d}' for x in src_sents[0].split('.'))
+            # Store sentence lists as sorted, joined strings for deduplication
+            src_sents_key = ' '.join(sorted(src_sents))
+            tgt_sents_key = ' '.join(sorted(tgt_sents))
+
+            rows.append((
+                src_doc, tgt_doc,
+                src_sents_key, tgt_sents_key,
+                scores.aligner, scores.bicleaner, scores.bifixer,
+                sort_key
+            ))
+
+    cursor.executemany('''
+        INSERT OR IGNORE INTO alignments
+        (src_doc, tgt_doc, src_sents, tgt_sents, aligner_score, bicleaner_score, bifixer_score, sort_key)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ''', rows)
+
+    conn.commit()
+
+
+def finalize_alignments_db(conn: sqlite3.Connection):
+    """Create index for efficient querying after all inserts are done."""
+    logger.info("Creating database indexes for final output...")
+    cursor = conn.cursor()
+    cursor.execute('CREATE INDEX idx_doc_pair_sort ON alignments(src_doc, tgt_doc, sort_key)')
+    conn.commit()
+
+
+def get_alignment_stats(conn: sqlite3.Connection) -> Tuple[int, int]:
+    """Get count of unique document pairs and total alignments."""
+    cursor = conn.cursor()
+    cursor.execute('SELECT COUNT(DISTINCT src_doc || tgt_doc) FROM alignments')
+    doc_pairs = cursor.fetchone()[0]
+    cursor.execute('SELECT COUNT(*) FROM alignments')
+    total_alignments = cursor.fetchone()[0]
+    return doc_pairs, total_alignments
+
+
+def stream_alignments_from_db(conn: sqlite3.Connection):
+    """Generator that yields (doc_pair, alignments) from the database, sorted."""
+    cursor = conn.cursor()
+
+    # Get all unique document pairs, sorted
+    cursor.execute('''
+        SELECT DISTINCT src_doc, tgt_doc
+        FROM alignments
+        ORDER BY src_doc, tgt_doc
+    ''')
+    doc_pairs = cursor.fetchall()
+
+    for src_doc, tgt_doc in doc_pairs:
+        # Get all alignments for this document pair, sorted by sort_key
+        cursor.execute('''
+            SELECT src_sents, tgt_sents, aligner_score, bicleaner_score, bifixer_score
+            FROM alignments
+            WHERE src_doc = ? AND tgt_doc = ?
+            ORDER BY sort_key
+        ''', (src_doc, tgt_doc))
+
+        alignments = []
+        for row in cursor.fetchall():
+            src_sents = row[0].split()
+            tgt_sents = row[1].split()
+            # Re-sort by numeric value for output (stored sorted alphabetically for dedup)
+            src_sents.sort(key=lambda x: tuple(map(int, x.split('.'))))
+            tgt_sents.sort(key=lambda x: tuple(map(int, x.split('.'))))
+            scores = AlignmentScores(aligner=row[2], bicleaner=row[3], bifixer=row[4])
+            alignments.append((src_sents, tgt_sents, scores))
+
+        yield ((src_doc, tgt_doc), alignments)
 
 def format_score_attributes(scores: AlignmentScores) -> str:
     """Formats alignment scores as a string of XML attributes."""
@@ -756,13 +840,17 @@ def verify_alignments(folder: str, output: str, num_cpus: int, batch_size: int):
     pool = mp.Pool(num_cpus, initializer=worker_initializer,
                    initargs=(src_docs_zip, tgt_docs_zip))
     
+    # Create SQLite database for alignments (avoids keeping all results in memory)
+    alignments_db_path = temp_dir / 'alignments.db'
+    alignments_conn = create_alignments_database(alignments_db_path)
+    logger.info(f"Created alignments database: {alignments_db_path}")
+
     try:
         # process_func uses the original src_lang and tgt_lang to find the right data in the TMX
         process_func = partial(process_alignment_batch,
                                src_lang=src_lang,
                                tgt_lang=tgt_lang)
-        
-        batch_results = []
+
         aggregated_stats = {
             'src_hits': 0, 'src_misses': 0, 'src_fast_path': 0,
             'tgt_hits': 0, 'tgt_misses': 0, 'tgt_fast_path': 0,
@@ -781,7 +869,8 @@ def verify_alignments(folder: str, output: str, num_cpus: int, batch_size: int):
             for result in pbar:
                 if result:
                     alignments, stats = result
-                    batch_results.append(alignments)
+                    # Insert batch results directly to database instead of keeping in memory
+                    insert_batch_results_to_db(alignments_conn, alignments)
                     # Aggregate stats
                     for key in aggregated_stats:
                         aggregated_stats[key] += stats.get(key, 0)
@@ -799,23 +888,21 @@ def verify_alignments(folder: str, output: str, num_cpus: int, batch_size: int):
             f"hit_rate={tgt_hit_rate:.1f}%, fast_path={aggregated_stats['tgt_fast_path']:,}]"
         )
 
-        logger.info("Aggregating results to find all unique document pairs...")
-        all_doc_pairs = sorted(set(
-            doc_pair
-            for result in batch_results
-            for doc_pair in result.keys()
-        ))
-        total_link_groups = len(all_doc_pairs)
-        logger.info(f"Found {total_link_groups:,} unique document pairs to align.")
+        # Finalize database with indexes for efficient querying
+        finalize_alignments_db(alignments_conn)
 
-        final_sorted_alignments = merge_results(batch_results, all_doc_pairs)
-        
+        # Get statistics from database
+        total_link_groups, total_alignments = get_alignment_stats(alignments_conn)
+        logger.info(f"Found {total_link_groups:,} unique document pairs with {total_alignments:,} alignments.")
+
         logger.info(f"Writing final alignment file to {alignment_file}...")
+        # Stream alignments from database - no need to load all into memory
+        alignment_generator = stream_alignments_from_db(alignments_conn)
         # Pass the original src_lang and tgt_lang to the writer function.
         # The writer will handle the logic for sorting them alphabetically.
         write_streaming_xml(
-            alignment_file, 
-            final_sorted_alignments, 
+            alignment_file,
+            alignment_generator,
             total_link_groups,
             src_lang,
             tgt_lang
@@ -827,6 +914,10 @@ def verify_alignments(folder: str, output: str, num_cpus: int, batch_size: int):
         pool.close()
         pool.join()
         logger.info("Worker pool shutdown complete.")
+
+        # Close alignments database connection
+        if alignments_conn:
+            alignments_conn.close()
 
         # Cleanup temp SQLite databases
         import shutil
