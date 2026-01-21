@@ -3,14 +3,13 @@ import gzip
 import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from zipfile import ZipFile
 from tqdm import tqdm
 import logging
 from collections import defaultdict
 import multiprocessing as mp
 from functools import partial
 from itertools import islice
-from typing import Dict, List, Tuple, Optional, NamedTuple, Set
+from typing import Dict, List, Tuple, Optional, NamedTuple
 import math
 import atexit
 import os
@@ -56,45 +55,38 @@ shared_tgt_db_path: Optional[Path] = None
 # --- Worker-Specific Globals ---
 worker_src_zip_path: Optional[Path] = None
 worker_tgt_zip_path: Optional[Path] = None
-worker_src_document_cache: Optional[Dict[str, bytes]] = None
-worker_tgt_document_cache: Optional[Dict[str, bytes]] = None
 worker_src_db_conn: Optional[sqlite3.Connection] = None
 worker_tgt_db_conn: Optional[sqlite3.Connection] = None
-
-# --- Cache Statistics ---
-worker_cache_stats: Optional[Dict[str, int]] = None
+worker_path_stats: Optional[Dict[str, int]] = None
+worker_src_content_cache: Optional[Dict[str, Optional[bytes]]] = None  # Cache for source document extractions
 
 def worker_initializer(src_zip_path: Path, tgt_zip_path: Path):
     """
     Initialize each worker. Stores ZIP paths and connects to SQLite databases.
-    Documents are extracted on-demand using batch pre-fetch.
+    Documents are extracted on-demand using unzip -p.
     """
     global worker_src_zip_path, worker_tgt_zip_path
-    global worker_src_document_cache, worker_tgt_document_cache
     global worker_src_db_conn, worker_tgt_db_conn
-    global worker_cache_stats
+    global worker_path_stats, worker_src_content_cache
 
     try:
-        # Store paths - documents will be batch extracted per batch
         worker_src_zip_path = src_zip_path
         worker_tgt_zip_path = tgt_zip_path
-
-        worker_src_document_cache = {}
-        worker_tgt_document_cache = {}
 
         # Connect to SQLite databases (read-only, shared cache for efficiency)
         worker_src_db_conn = sqlite3.connect(f"file:{shared_src_db_path}?mode=ro", uri=True)
         worker_tgt_db_conn = sqlite3.connect(f"file:{shared_tgt_db_path}?mode=ro", uri=True)
 
-        # Initialize cache statistics
-        worker_cache_stats = {
-            'src_hits': 0,
-            'src_misses': 0,
-            'tgt_hits': 0,
-            'tgt_misses': 0,
-            'src_fast_path': 0,  # single-version, no read needed
+        # Initialize path statistics
+        worker_path_stats = {
+            'src_fast_path': 0,
+            'src_slow_path': 0,
             'tgt_fast_path': 0,
+            'tgt_slow_path': 0,
         }
+
+        # Initialize source content cache (source has multi-version docs, target doesn't)
+        worker_src_content_cache = {}
 
         logger.info(f"Worker {mp.current_process().pid} initialized successfully.")
 
@@ -106,32 +98,8 @@ def worker_initializer(src_zip_path: Path, tgt_zip_path: Path):
 
 def worker_cleanup():
     """Clean up worker resources when a process terminates."""
-    global worker_cache_stats, worker_src_db_conn, worker_tgt_db_conn
+    global worker_src_db_conn, worker_tgt_db_conn
     try:
-        # Log cache statistics before cleanup
-        if worker_cache_stats:
-            pid = mp.current_process().pid
-            src_total = worker_cache_stats['src_hits'] + worker_cache_stats['src_misses']
-            tgt_total = worker_cache_stats['tgt_hits'] + worker_cache_stats['tgt_misses']
-            src_hit_rate = (worker_cache_stats['src_hits'] / src_total * 100) if src_total > 0 else 0
-            tgt_hit_rate = (worker_cache_stats['tgt_hits'] / tgt_total * 100) if tgt_total > 0 else 0
-
-            # Calculate cache sizes
-            src_cache_size = len(worker_src_document_cache) if worker_src_document_cache else 0
-            tgt_cache_size = len(worker_tgt_document_cache) if worker_tgt_document_cache else 0
-            src_cache_bytes = sum(len(v) for v in worker_src_document_cache.values() if v) if worker_src_document_cache else 0
-            tgt_cache_bytes = sum(len(v) for v in worker_tgt_document_cache.values() if v) if worker_tgt_document_cache else 0
-
-            logger.info(
-                f"Worker {pid} cache stats: "
-                f"SRC[hits={worker_cache_stats['src_hits']}, misses={worker_cache_stats['src_misses']}, "
-                f"hit_rate={src_hit_rate:.1f}%, fast_path={worker_cache_stats['src_fast_path']}, "
-                f"cached_docs={src_cache_size}, cache_MB={src_cache_bytes/1024/1024:.1f}] "
-                f"TGT[hits={worker_cache_stats['tgt_hits']}, misses={worker_cache_stats['tgt_misses']}, "
-                f"hit_rate={tgt_hit_rate:.1f}%, fast_path={worker_cache_stats['tgt_fast_path']}, "
-                f"cached_docs={tgt_cache_size}, cache_MB={tgt_cache_bytes/1024/1024:.1f}]"
-            )
-
         # Close SQLite connections
         if worker_src_db_conn:
             worker_src_db_conn.close()
@@ -141,86 +109,6 @@ def worker_cleanup():
         logger.debug(f"Worker {mp.current_process().pid} cleanup complete.")
     except Exception as e:
         logger.debug(f"Error during worker cleanup in {mp.current_process().pid}: {e}")
-
-def batch_extract_to_cache(files: Set[str], zip_path: Path, cache: Dict[str, bytes]):
-    """
-    Extract multiple files from a ZIP using unzip command and populate cache.
-    Uses temp directory and processes in chunks to handle command line limits.
-    Each unzip call scans the central directory once and extracts all requested files.
-    """
-    import subprocess
-
-    if not files:
-        return
-
-    # Filter out files already in cache
-    files_to_extract = [f for f in files if f not in cache]
-    if not files_to_extract:
-        return
-
-    # Chunk size based on command line limits (~128KB safe, avg filename ~60 chars)
-    chunk_size = 1500
-
-    for i in range(0, len(files_to_extract), chunk_size):
-        chunk = files_to_extract[i:i+chunk_size]
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            # -j: junk paths (extract flat)
-            # -o: overwrite without prompting
-            # -q: quiet
-            cmd = ['unzip', '-j', '-o', '-q', '-d', tmpdir, str(zip_path)] + chunk
-            try:
-                subprocess.run(cmd, capture_output=True, timeout=600, check=False)
-            except subprocess.TimeoutExpired:
-                logger.warning(f"Timeout during batch extraction of {len(chunk)} files from {zip_path.name}")
-
-            # Read extracted files into cache
-            for filename in chunk:
-                # Handle both flat filenames and paths
-                basename = os.path.basename(filename) if '/' in filename else filename
-                filepath = os.path.join(tmpdir, basename)
-                try:
-                    with open(filepath, 'rb') as f:
-                        cache[filename] = f.read()
-                except FileNotFoundError:
-                    cache[filename] = None
-
-def collect_batch_file_requirements(
-    batch: List[ET.Element],
-    src_lang: str,
-    tgt_lang: str
-) -> Tuple[Set[str], Set[str]]:
-    """
-    Pre-scan a batch to collect all document files that need to be extracted.
-    Only includes files for documents with multiple versions (single-version uses fast path).
-    Returns (src_files_to_extract, tgt_files_to_extract).
-    """
-    src_files: Set[str] = set()
-    tgt_files: Set[str] = set()
-
-    for tu in batch:
-        src_tuv = tu.find(f".//tuv[@{{{XML_NS['xml']}}}lang='{src_lang}']")
-        tgt_tuv = tu.find(f".//tuv[@{{{XML_NS['xml']}}}lang='{tgt_lang}']")
-
-        if src_tuv is None or tgt_tuv is None:
-            continue
-
-        src_doc_info_list = extract_document_info_from_tuv(src_tuv)
-        tgt_doc_info_list = extract_document_info_from_tuv(tgt_tuv)
-
-        for src_doc_url, _, _ in src_doc_info_list:
-            base_path = sanitize_url_to_filename(src_doc_url)
-            versions = get_document_versions_from_db(base_path, 'src')
-            if len(versions) > 1:  # Only need to extract if multiple versions
-                src_files.update(versions)
-
-        for tgt_doc_url, _, _ in tgt_doc_info_list:
-            base_path = sanitize_url_to_filename(tgt_doc_url)
-            versions = get_document_versions_from_db(base_path, 'tgt')
-            if len(versions) > 1:  # Only need to extract if multiple versions
-                tgt_files.update(versions)
-
-    return src_files, tgt_files
 
 def sanitize_url_to_filename(url: str) -> str:
     """
@@ -388,22 +276,39 @@ def scan_zip_to_sqlite_via_unzip(zip_path: Path, db_path: Path) -> int:
     conn.close()
     return unique_count
 
-def get_cached_document_content(xml_path: str, lang: str) -> Optional[bytes]:
+def extract_document_content(xml_path: str, lang: str) -> Optional[bytes]:
     """
-    Gets document content from the worker-local cache.
-    Cache should be pre-populated by batch_extract_to_cache before calling this.
+    Extract document content directly from ZIP using unzip -p.
+    For source documents, uses a cache to avoid repeated extractions.
     """
-    cache = worker_src_document_cache if lang == 'src' else worker_tgt_document_cache
-    hit_key = f'{lang}_hits'
-    miss_key = f'{lang}_misses'
+    import subprocess
 
-    if xml_path in cache:
-        worker_cache_stats[hit_key] += 1
-        return cache[xml_path]
+    # Check cache for source documents (source has multi-version docs that get accessed repeatedly)
+    if lang == 'src' and worker_src_content_cache is not None:
+        if xml_path in worker_src_content_cache:
+            return worker_src_content_cache[xml_path]
 
-    # Cache miss - file wasn't pre-fetched (shouldn't happen often)
-    worker_cache_stats[miss_key] += 1
-    return None
+    zip_path = worker_src_zip_path if lang == 'src' else worker_tgt_zip_path
+
+    try:
+        result = subprocess.run(
+            ['unzip', '-p', str(zip_path), xml_path],
+            capture_output=True,
+            timeout=60
+        )
+        content = result.stdout if result.returncode == 0 and result.stdout else None
+
+        # Cache source document content
+        if lang == 'src' and worker_src_content_cache is not None:
+            worker_src_content_cache[xml_path] = content
+
+        return content
+    except subprocess.TimeoutExpired:
+        logger.warning(f"Timeout extracting {xml_path} from {zip_path.name}")
+        return None
+    except Exception as e:
+        logger.warning(f"Error extracting {xml_path}: {e}")
+        return None
 
 def parse_xml_from_content(content: Optional[bytes]) -> Optional[ET.ElementTree]:
     """Safely parses XML content from bytes into an ElementTree."""
@@ -450,10 +355,9 @@ def get_document_matches_optimized(
     para_info: List[Dict]
 ) -> List[Tuple[str, List[str]]]:
     """
-    CRITICAL OPTIMIZATION: Get matches for a document, avoiding parsing when possible.
+    Get matches for a document, avoiding parsing when possible.
+    Fast path: single version documents don't need XML parsing.
     """
-    fast_path_key = f'{lang}_fast_path'
-
     all_matches = []
     versions = get_document_versions_from_db(base_path, lang)
 
@@ -462,7 +366,7 @@ def get_document_matches_optimized(
 
     if len(versions) == 1:
         # Fast path: single version, no need to read/parse XML
-        worker_cache_stats[fast_path_key] += 1
+        worker_path_stats[f'{lang}_fast_path'] += 1
         matches = [
             f"{p['paragraph_num']}.{p['sentence_num']}"
             for p in para_info if p
@@ -472,8 +376,9 @@ def get_document_matches_optimized(
         return all_matches
 
     # Slow path: multiple versions, must read and parse to find correct one
+    worker_path_stats[f'{lang}_slow_path'] += 1
     for version_path in versions:
-        content = get_cached_document_content(version_path, lang)
+        content = extract_document_content(version_path, lang)
         if content:
             doc_tree = parse_xml_from_content(content)
             if doc_tree:
@@ -490,84 +395,71 @@ def process_alignment_batch(
 ) -> Tuple[Dict[Tuple[str, str], List[Tuple[List[str], List[str], AlignmentScores]]], Dict[str, int]]:
     """
     Processes a batch of <tu> elements using worker-local resources.
-    Uses batch pre-fetch to extract all needed files upfront.
+    Documents are extracted on-demand using unzip -p.
+    Returns (alignments, path_stats_delta).
     """
-    # Snapshot stats at start to compute delta for this batch only
-    stats_before = dict(worker_cache_stats) if worker_cache_stats else {}
+    # Snapshot stats at start to compute delta for this batch
+    stats_before = dict(worker_path_stats)
 
-    # Phase 1: Collect all files needed for this batch and extract them
-    src_files_needed, tgt_files_needed = collect_batch_file_requirements(batch, src_lang, tgt_lang)
-
-    # Batch extract to cache (one unzip call per ~1500 files)
-    if src_files_needed:
-        batch_extract_to_cache(src_files_needed, worker_src_zip_path, worker_src_document_cache)
-    if tgt_files_needed:
-        batch_extract_to_cache(tgt_files_needed, worker_tgt_zip_path, worker_tgt_document_cache)
-
-    # Phase 2: Process the batch using cached content
     local_doc_alignments = defaultdict(list)
     seen_alignments = defaultdict(set)
 
     for tu in batch:
         src_tuv = tu.find(f".//tuv[@{{{XML_NS['xml']}}}lang='{src_lang}']")
         tgt_tuv = tu.find(f".//tuv[@{{{XML_NS['xml']}}}lang='{tgt_lang}']")
-        
+
         if src_tuv is None or tgt_tuv is None:
             continue
-        
+
         src_doc_info_list = extract_document_info_from_tuv(src_tuv)
         tgt_doc_info_list = extract_document_info_from_tuv(tgt_tuv)
         scores_list = extract_scores_from_tu(tu)
-        
+
         min_len = min(len(src_doc_info_list), len(tgt_doc_info_list), len(scores_list))
-        
+
         for i in range(min_len):
             src_doc_url, src_para_id, _ = src_doc_info_list[i]
             tgt_doc_url, tgt_para_id, _ = tgt_doc_info_list[i]
             scores = scores_list[i]
-            
+
             src_base_path = sanitize_url_to_filename(src_doc_url)
             tgt_base_path = sanitize_url_to_filename(tgt_doc_url)
-            
+
             src_para_info = parse_paragraph_id(src_para_id)
             tgt_para_info = parse_paragraph_id(tgt_para_id)
-            
+
             if not src_para_info or not tgt_para_info:
                 continue
 
             src_matches = get_document_matches_optimized(src_base_path, 'src', src_para_info)
             tgt_matches = get_document_matches_optimized(tgt_base_path, 'tgt', tgt_para_info)
-            
+
             for src_file, src_sents in src_matches:
                 for tgt_file, tgt_sents in tgt_matches:
                     doc_pair = (src_file, tgt_file)
-                    
+
                     alignment_key = (tuple(sorted(src_sents)), tuple(sorted(tgt_sents)))
                     if alignment_key in seen_alignments[doc_pair]:
                         continue
-                    
+
                     seen_alignments[doc_pair].add(alignment_key)
-                    
+
                     src_sents.sort(key=lambda x: tuple(map(int, x.split('.'))))
                     tgt_sents.sort(key=lambda x: tuple(map(int, x.split('.'))))
-                    
+
                     local_doc_alignments[doc_pair].append((src_sents, tgt_sents, scores))
-        
+
         tu.clear()
 
     for alignments in local_doc_alignments.values():
         alignments.sort(key=lambda x: tuple(map(int, x[0][0].split('.'))))
 
-    # Clear caches to free memory before next batch
-    worker_src_document_cache.clear()
-    worker_tgt_document_cache.clear()
-
-    # Return alignments and delta stats for this batch only
-    stats_after = dict(worker_cache_stats) if worker_cache_stats else {}
+    # Compute stats delta for this batch
     stats_delta = {
-        key: stats_after.get(key, 0) - stats_before.get(key, 0)
-        for key in ['src_hits', 'src_misses', 'src_fast_path', 'tgt_hits', 'tgt_misses', 'tgt_fast_path']
+        key: worker_path_stats[key] - stats_before[key]
+        for key in worker_path_stats
     }
+
     return local_doc_alignments, stats_delta
 
 def create_alignments_database(db_path: Path) -> sqlite3.Connection:
@@ -851,9 +743,10 @@ def verify_alignments(folder: str, output: str, num_cpus: int, batch_size: int):
                                src_lang=src_lang,
                                tgt_lang=tgt_lang)
 
+        # Aggregate path statistics
         aggregated_stats = {
-            'src_hits': 0, 'src_misses': 0, 'src_fast_path': 0,
-            'tgt_hits': 0, 'tgt_misses': 0, 'tgt_fast_path': 0,
+            'src_fast_path': 0, 'src_slow_path': 0,
+            'tgt_fast_path': 0, 'tgt_slow_path': 0,
         }
 
         with gzip.open(tmx_file, 'rt', encoding='utf-8', errors='ignore') as f:
@@ -875,17 +768,15 @@ def verify_alignments(folder: str, output: str, num_cpus: int, batch_size: int):
                     for key in aggregated_stats:
                         aggregated_stats[key] += stats.get(key, 0)
 
-        # Log aggregated cache statistics
-        src_total = aggregated_stats['src_hits'] + aggregated_stats['src_misses']
-        tgt_total = aggregated_stats['tgt_hits'] + aggregated_stats['tgt_misses']
-        src_hit_rate = (aggregated_stats['src_hits'] / src_total * 100) if src_total > 0 else 0
-        tgt_hit_rate = (aggregated_stats['tgt_hits'] / tgt_total * 100) if tgt_total > 0 else 0
+        # Log path statistics
+        src_total = aggregated_stats['src_fast_path'] + aggregated_stats['src_slow_path']
+        tgt_total = aggregated_stats['tgt_fast_path'] + aggregated_stats['tgt_slow_path']
+        src_fast_pct = (aggregated_stats['src_fast_path'] / src_total * 100) if src_total > 0 else 0
+        tgt_fast_pct = (aggregated_stats['tgt_fast_path'] / tgt_total * 100) if tgt_total > 0 else 0
         logger.info(
-            f"Cache stats (aggregated): "
-            f"SRC[hits={aggregated_stats['src_hits']:,}, misses={aggregated_stats['src_misses']:,}, "
-            f"hit_rate={src_hit_rate:.1f}%, fast_path={aggregated_stats['src_fast_path']:,}] "
-            f"TGT[hits={aggregated_stats['tgt_hits']:,}, misses={aggregated_stats['tgt_misses']:,}, "
-            f"hit_rate={tgt_hit_rate:.1f}%, fast_path={aggregated_stats['tgt_fast_path']:,}]"
+            f"Path stats: "
+            f"SRC[fast={aggregated_stats['src_fast_path']:,}, slow={aggregated_stats['src_slow_path']:,}, fast%={src_fast_pct:.1f}%] "
+            f"TGT[fast={aggregated_stats['tgt_fast_path']:,}, slow={aggregated_stats['tgt_slow_path']:,}, fast%={tgt_fast_pct:.1f}%]"
         )
 
         # Finalize database with indexes for efficient querying
