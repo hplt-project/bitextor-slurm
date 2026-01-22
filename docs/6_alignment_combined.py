@@ -1,7 +1,12 @@
 import argparse
 import gzip
 import re
-import xml.etree.ElementTree as ET
+try:
+    from lxml import etree as ET
+    USING_LXML = True
+except ImportError:
+    import xml.etree.ElementTree as ET
+    USING_LXML = False
 from pathlib import Path
 from tqdm import tqdm
 import logging
@@ -25,9 +30,11 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+logger.info(f"Using {'lxml' if USING_LXML else 'ElementTree'} for XML parsing")
 
 # Register the XML namespace to correctly parse 'xml:lang' attributes
-ET.register_namespace('xml', 'http://www.w3.org/XML/1998/namespace')
+if not USING_LXML:
+    ET.register_namespace('xml', 'http://www.w3.org/XML/1998/namespace')
 XML_NS = {'xml': 'http://www.w3.org/XML/1998/namespace'}
 
 # Bitextor segment separator constant
@@ -470,8 +477,16 @@ def get_document_matches_optimized(
 
     return all_matches
 
+def deserialize_tu_batch(batch: List[bytes]) -> List:
+    """Deserialize a batch of TU elements from bytes (for lxml compatibility with multiprocessing)."""
+    if USING_LXML:
+        return [ET.fromstring(tu_bytes) for tu_bytes in batch]
+    else:
+        return batch  # ElementTree elements are already unpickled
+
+
 def collect_slow_path_documents(
-    batch: List[ET.Element],
+    batch: List,
     src_lang: str,
     tgt_lang: str
 ) -> Tuple[Set[str], Set[str], List[Tuple]]:
@@ -479,11 +494,14 @@ def collect_slow_path_documents(
     First pass: collect all documents needing slow-path extraction.
     Returns (src_paths_to_extract, tgt_paths_to_extract, parsed_tu_data).
     """
+    # Deserialize if needed (lxml elements can't be pickled)
+    tu_elements = deserialize_tu_batch(batch)
+
     src_paths_to_extract = set()
     tgt_paths_to_extract = set()
     parsed_tu_data = []
 
-    for tu in batch:
+    for tu in tu_elements:
         src_tuv = tu.find(f".//tuv[@{{{XML_NS['xml']}}}lang='{src_lang}']")
         tgt_tuv = tu.find(f".//tuv[@{{{XML_NS['xml']}}}lang='{tgt_lang}']")
 
@@ -849,7 +867,7 @@ def count_total_tus(tmx_file_path: Path) -> int:
     logger.info(f"First pass: Counting total translation units in {tmx_file_path.name}...")
     count = 0
     try:
-        with gzip.open(tmx_file_path, 'rt', encoding='utf-8', errors='ignore') as f:
+        with gzip.open(tmx_file_path, 'rb') as f:
             for event, elem in tqdm(ET.iterparse(f, events=('end',))):
                 if elem.tag == 'tu':
                     count += 1
@@ -860,10 +878,31 @@ def count_total_tus(tmx_file_path: Path) -> int:
         logger.error(f"Could not count TUs due to an error: {e}. Progress bar total will be approximate.")
         return 0
 
-def chunk_iterator(iterator, chunk_size):
-    """Splits an iterator into chunks of a specified size."""
+def serialize_element(elem) -> bytes:
+    """Serialize an XML element to bytes for pickling (lxml compatibility)."""
+    if USING_LXML:
+        return ET.tostring(elem)
+    else:
+        return elem  # ElementTree elements can be pickled directly
+
+
+def chunk_iterator(iterator, chunk_size, serialize=False):
+    """Splits an iterator into chunks of a specified size, optionally serializing elements."""
     iterator = iter(iterator)
-    return iter(lambda: list(islice(iterator, chunk_size)), [])
+    if serialize:
+        # Serialize elements for lxml multiprocessing compatibility
+        def get_chunk():
+            chunk = list(islice(iterator, chunk_size))
+            if not chunk:
+                return []
+            serialized = []
+            for elem in chunk:
+                serialized.append(serialize_element(elem))
+                elem.clear()  # Free memory after serializing
+            return serialized
+        return iter(get_chunk, [])
+    else:
+        return iter(lambda: list(islice(iterator, chunk_size)), [])
 
 def verify_alignments(folder: str, output: str, num_cpus: int, batch_size: int):
     """Main function to drive the alignment verification process."""
@@ -959,10 +998,10 @@ def verify_alignments(folder: str, output: str, num_cpus: int, batch_size: int):
             'sqlite_query_time': 0.0, 'sqlite_query_calls': 0,
         }
 
-        with gzip.open(tmx_file, 'rt', encoding='utf-8', errors='ignore') as f:
+        with gzip.open(tmx_file, 'rb') as f:
             context = ET.iterparse(f, events=('end',))
             tu_iterator = (elem for _, elem in context if elem.tag == 'tu')
-            batches = chunk_iterator(tu_iterator, batch_size)
+            batches = chunk_iterator(tu_iterator, batch_size, serialize=USING_LXML)
 
             logger.info(f"Processing {total_tus:,} TUs in {total_batches or 'unknown'} batches of size {batch_size}...")
 
