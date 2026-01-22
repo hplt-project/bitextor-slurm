@@ -9,16 +9,19 @@ from collections import defaultdict
 import multiprocessing as mp
 from functools import partial
 from itertools import islice
-from typing import Dict, List, Tuple, Optional, NamedTuple
+from typing import Dict, List, Tuple, Optional, NamedTuple, Set
 import math
 import atexit
 import os
+import shutil
 import sqlite3
+import subprocess
 import tempfile
+import time
 
 # --- Configuration ---
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
@@ -59,6 +62,8 @@ worker_src_db_conn: Optional[sqlite3.Connection] = None
 worker_tgt_db_conn: Optional[sqlite3.Connection] = None
 worker_path_stats: Optional[Dict[str, int]] = None
 worker_src_content_cache: Optional[Dict[str, Optional[bytes]]] = None  # Cache for source document extractions
+worker_timing_stats: Optional[Dict[str, float]] = None  # Timing instrumentation
+worker_batch_extract_dir: Optional[Path] = None  # Temp directory for batch extractions
 
 def worker_initializer(src_zip_path: Path, tgt_zip_path: Path):
     """
@@ -67,7 +72,7 @@ def worker_initializer(src_zip_path: Path, tgt_zip_path: Path):
     """
     global worker_src_zip_path, worker_tgt_zip_path
     global worker_src_db_conn, worker_tgt_db_conn
-    global worker_path_stats, worker_src_content_cache
+    global worker_path_stats, worker_src_content_cache, worker_timing_stats
 
     try:
         worker_src_zip_path = src_zip_path
@@ -87,6 +92,16 @@ def worker_initializer(src_zip_path: Path, tgt_zip_path: Path):
 
         # Initialize source content cache (source has multi-version docs, target doesn't)
         worker_src_content_cache = {}
+
+        # Initialize timing stats
+        worker_timing_stats = {
+            'unzip_time': 0.0,
+            'unzip_calls': 0,
+            'xml_parse_time': 0.0,
+            'xml_parse_calls': 0,
+            'sqlite_query_time': 0.0,
+            'sqlite_query_calls': 0,
+        }
 
         logger.info(f"Worker {mp.current_process().pid} initialized successfully.")
 
@@ -207,8 +222,6 @@ def scan_zip_to_sqlite_via_unzip(zip_path: Path, db_path: Path) -> int:
     and creates a SQLite database mapping base filenames to versioned paths.
     Returns the number of unique base documents.
     """
-    import subprocess
-
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
 
@@ -276,26 +289,85 @@ def scan_zip_to_sqlite_via_unzip(zip_path: Path, db_path: Path) -> int:
     conn.close()
     return unique_count
 
+def batch_extract_documents(xml_paths: List[str], lang: str, extract_dir: Path) -> int:
+    """
+    Extract multiple documents from ZIP in a single unzip call.
+    Chunks into multiple calls if too many files (to avoid command line length limits).
+    Returns the number of files successfully extracted.
+    """
+    if not xml_paths:
+        return 0
+
+    zip_path = worker_src_zip_path if lang == 'src' else worker_tgt_zip_path
+
+    # Chunk to avoid hitting command line length limits (~2MB on Linux)
+    # Conservative limit: ~5000 files per call (assuming ~200 char avg path)
+    CHUNK_SIZE = 5000
+    total_extracted = 0
+
+    for i in range(0, len(xml_paths), CHUNK_SIZE):
+        chunk = xml_paths[i:i + CHUNK_SIZE]
+        try:
+            t0 = time.perf_counter()
+            # unzip can extract multiple files at once: unzip archive.zip file1 file2 ... -d outdir
+            cmd = ['unzip', '-o', '-q', str(zip_path)] + chunk + ['-d', str(extract_dir)]
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                timeout=300  # Longer timeout for batch extraction
+            )
+            if worker_timing_stats is not None:
+                worker_timing_stats['unzip_time'] += time.perf_counter() - t0
+                worker_timing_stats['unzip_calls'] += 1
+
+            # Count extracted files (some may not exist in archive)
+            extracted = sum(1 for p in chunk if (extract_dir / p).exists())
+            total_extracted += extracted
+        except subprocess.TimeoutExpired:
+            logger.warning(f"Timeout batch extracting {len(chunk)} files from {zip_path.name}")
+        except Exception as e:
+            logger.warning(f"Error batch extracting chunk: {e}")
+
+    return total_extracted
+
+
 def extract_document_content(xml_path: str, lang: str) -> Optional[bytes]:
     """
-    Extract document content directly from ZIP using unzip -p.
+    Extract document content. First checks batch extraction directory,
+    then falls back to individual unzip -p call.
     For source documents, uses a cache to avoid repeated extractions.
     """
-    import subprocess
-
     # Check cache for source documents (source has multi-version docs that get accessed repeatedly)
     if lang == 'src' and worker_src_content_cache is not None:
         if xml_path in worker_src_content_cache:
             return worker_src_content_cache[xml_path]
 
+    # Check if file was batch-extracted
+    if worker_batch_extract_dir is not None:
+        extracted_path = worker_batch_extract_dir / xml_path
+        if extracted_path.exists():
+            try:
+                content = extracted_path.read_bytes()
+                # Cache source document content
+                if lang == 'src' and worker_src_content_cache is not None:
+                    worker_src_content_cache[xml_path] = content
+                return content
+            except Exception as e:
+                logger.warning(f"Error reading extracted file {extracted_path}: {e}")
+
+    # Fall back to individual extraction (should be rare after batch extraction)
     zip_path = worker_src_zip_path if lang == 'src' else worker_tgt_zip_path
 
     try:
+        t0 = time.perf_counter()
         result = subprocess.run(
             ['unzip', '-p', str(zip_path), xml_path],
             capture_output=True,
             timeout=60
         )
+        if worker_timing_stats is not None:
+            worker_timing_stats['unzip_time'] += time.perf_counter() - t0
+            worker_timing_stats['unzip_calls'] += 1
         content = result.stdout if result.returncode == 0 and result.stdout else None
 
         # Cache source document content
@@ -316,7 +388,12 @@ def parse_xml_from_content(content: Optional[bytes]) -> Optional[ET.ElementTree]
         return None
     try:
         import io
-        return ET.parse(io.BytesIO(content))
+        t0 = time.perf_counter()
+        tree = ET.parse(io.BytesIO(content))
+        if worker_timing_stats is not None:
+            worker_timing_stats['xml_parse_time'] += time.perf_counter() - t0
+            worker_timing_stats['xml_parse_calls'] += 1
+        return tree
     except ET.ParseError as e:
         logger.warning(f"Skipping malformed XML file: {e}")
         return None
@@ -346,8 +423,13 @@ def get_document_versions_from_db(base_path: str, lang: str) -> List[str]:
     """Query SQLite database for document versions."""
     db_conn = worker_src_db_conn if lang == 'src' else worker_tgt_db_conn
     cursor = db_conn.cursor()
+    t0 = time.perf_counter()
     cursor.execute('SELECT version_path FROM doc_versions WHERE base_name = ?', (base_path,))
-    return [row[0] for row in cursor.fetchall()]
+    result = [row[0] for row in cursor.fetchall()]
+    if worker_timing_stats is not None:
+        worker_timing_stats['sqlite_query_time'] += time.perf_counter() - t0
+        worker_timing_stats['sqlite_query_calls'] += 1
+    return result
 
 def get_document_matches_optimized(
     base_path: str,
@@ -388,21 +470,18 @@ def get_document_matches_optimized(
 
     return all_matches
 
-def process_alignment_batch(
+def collect_slow_path_documents(
     batch: List[ET.Element],
     src_lang: str,
     tgt_lang: str
-) -> Tuple[Dict[Tuple[str, str], List[Tuple[List[str], List[str], AlignmentScores]]], Dict[str, int]]:
+) -> Tuple[Set[str], Set[str], List[Tuple]]:
     """
-    Processes a batch of <tu> elements using worker-local resources.
-    Documents are extracted on-demand using unzip -p.
-    Returns (alignments, path_stats_delta).
+    First pass: collect all documents needing slow-path extraction.
+    Returns (src_paths_to_extract, tgt_paths_to_extract, parsed_tu_data).
     """
-    # Snapshot stats at start to compute delta for this batch
-    stats_before = dict(worker_path_stats)
-
-    local_doc_alignments = defaultdict(list)
-    seen_alignments = defaultdict(set)
+    src_paths_to_extract = set()
+    tgt_paths_to_extract = set()
+    parsed_tu_data = []
 
     for tu in batch:
         src_tuv = tu.find(f".//tuv[@{{{XML_NS['xml']}}}lang='{src_lang}']")
@@ -417,6 +496,7 @@ def process_alignment_batch(
 
         min_len = min(len(src_doc_info_list), len(tgt_doc_info_list), len(scores_list))
 
+        tu_entries = []
         for i in range(min_len):
             src_doc_url, src_para_id, _ = src_doc_info_list[i]
             tgt_doc_url, tgt_para_id, _ = tgt_doc_info_list[i]
@@ -431,28 +511,108 @@ def process_alignment_batch(
             if not src_para_info or not tgt_para_info:
                 continue
 
-            src_matches = get_document_matches_optimized(src_base_path, 'src', src_para_info)
-            tgt_matches = get_document_matches_optimized(tgt_base_path, 'tgt', tgt_para_info)
+            # Check if slow path needed for src
+            src_versions = get_document_versions_from_db(src_base_path, 'src')
+            if len(src_versions) > 1:
+                src_paths_to_extract.update(src_versions)
 
-            for src_file, src_sents in src_matches:
-                for tgt_file, tgt_sents in tgt_matches:
-                    doc_pair = (src_file, tgt_file)
+            # Check if slow path needed for tgt
+            tgt_versions = get_document_versions_from_db(tgt_base_path, 'tgt')
+            if len(tgt_versions) > 1:
+                tgt_paths_to_extract.update(tgt_versions)
 
-                    alignment_key = (tuple(sorted(src_sents)), tuple(sorted(tgt_sents)))
-                    if alignment_key in seen_alignments[doc_pair]:
-                        continue
+            tu_entries.append((
+                src_base_path, tgt_base_path,
+                src_para_info, tgt_para_info,
+                src_versions, tgt_versions,
+                scores
+            ))
 
-                    seen_alignments[doc_pair].add(alignment_key)
-
-                    src_sents.sort(key=lambda x: tuple(map(int, x.split('.'))))
-                    tgt_sents.sort(key=lambda x: tuple(map(int, x.split('.'))))
-
-                    local_doc_alignments[doc_pair].append((src_sents, tgt_sents, scores))
+        if tu_entries:
+            parsed_tu_data.append(tu_entries)
 
         tu.clear()
 
-    for alignments in local_doc_alignments.values():
-        alignments.sort(key=lambda x: tuple(map(int, x[0][0].split('.'))))
+    return src_paths_to_extract, tgt_paths_to_extract, parsed_tu_data
+
+
+def process_alignment_batch(
+    batch: List[ET.Element],
+    src_lang: str,
+    tgt_lang: str
+) -> Tuple[Dict[Tuple[str, str], List[Tuple[List[str], List[str], AlignmentScores]]], Dict[str, int]]:
+    """
+    Processes a batch of <tu> elements using worker-local resources.
+    Uses two-pass approach: first collect needed documents, batch extract, then process.
+    Returns (alignments, path_stats_delta, timing_stats).
+    """
+    global worker_batch_extract_dir
+
+    # Snapshot stats at start to compute delta for this batch
+    stats_before = dict(worker_path_stats)
+
+    # === PASS 1: Collect all documents needing slow-path extraction ===
+    src_paths_to_extract, tgt_paths_to_extract, parsed_tu_data = collect_slow_path_documents(
+        batch, src_lang, tgt_lang
+    )
+
+    # === BATCH EXTRACTION ===
+    # Create temp directory for this batch's extractions
+    worker_batch_extract_dir = Path(tempfile.mkdtemp(prefix=f'batch_extract_{mp.current_process().pid}_'))
+
+    try:
+        # Batch extract all needed documents
+        if src_paths_to_extract:
+            src_extracted = batch_extract_documents(
+                list(src_paths_to_extract), 'src', worker_batch_extract_dir
+            )
+            logger.debug(f"Batch extracted {src_extracted}/{len(src_paths_to_extract)} src documents")
+
+        if tgt_paths_to_extract:
+            tgt_extracted = batch_extract_documents(
+                list(tgt_paths_to_extract), 'tgt', worker_batch_extract_dir
+            )
+            logger.debug(f"Batch extracted {tgt_extracted}/{len(tgt_paths_to_extract)} tgt documents")
+
+        # === PASS 2: Process using pre-extracted documents ===
+        local_doc_alignments = defaultdict(list)
+        seen_alignments = defaultdict(set)
+
+        for tu_entries in parsed_tu_data:
+            for (src_base_path, tgt_base_path, src_para_info, tgt_para_info,
+                 src_versions, tgt_versions, scores) in tu_entries:
+
+                # Get matches (will use batch-extracted files)
+                src_matches = get_document_matches_from_versions(
+                    src_versions, 'src', src_para_info
+                )
+                tgt_matches = get_document_matches_from_versions(
+                    tgt_versions, 'tgt', tgt_para_info
+                )
+
+                for src_file, src_sents in src_matches:
+                    for tgt_file, tgt_sents in tgt_matches:
+                        doc_pair = (src_file, tgt_file)
+
+                        alignment_key = (tuple(sorted(src_sents)), tuple(sorted(tgt_sents)))
+                        if alignment_key in seen_alignments[doc_pair]:
+                            continue
+
+                        seen_alignments[doc_pair].add(alignment_key)
+
+                        src_sents.sort(key=lambda x: tuple(map(int, x.split('.'))))
+                        tgt_sents.sort(key=lambda x: tuple(map(int, x.split('.'))))
+
+                        local_doc_alignments[doc_pair].append((src_sents, tgt_sents, scores))
+
+        for alignments in local_doc_alignments.values():
+            alignments.sort(key=lambda x: tuple(map(int, x[0][0].split('.'))))
+
+    finally:
+        # Clean up temp directory
+        if worker_batch_extract_dir and worker_batch_extract_dir.exists():
+            shutil.rmtree(worker_batch_extract_dir, ignore_errors=True)
+        worker_batch_extract_dir = None
 
     # Compute stats delta for this batch
     stats_delta = {
@@ -460,7 +620,51 @@ def process_alignment_batch(
         for key in worker_path_stats
     }
 
-    return local_doc_alignments, stats_delta
+    # Include timing stats in result
+    timing_snapshot = dict(worker_timing_stats) if worker_timing_stats else {}
+
+    logger.debug(f"Batch loaded; worker_path_stats: {worker_path_stats}")
+    logger.debug(f"worker_timing_stats: {worker_timing_stats}")
+    return local_doc_alignments, stats_delta, timing_snapshot
+
+
+def get_document_matches_from_versions(
+    versions: List[str],
+    lang: str,
+    para_info: List[Dict]
+) -> List[Tuple[str, List[str]]]:
+    """
+    Get matches for a document given its versions (already looked up).
+    Fast path: single version documents don't need XML parsing.
+    """
+    all_matches = []
+
+    if not versions:
+        return all_matches
+
+    if len(versions) == 1:
+        # Fast path: single version, no need to read/parse XML
+        worker_path_stats[f'{lang}_fast_path'] += 1
+        matches = [
+            f"{p['paragraph_num']}.{p['sentence_num']}"
+            for p in para_info if p
+        ]
+        if matches:
+            all_matches.append((versions[0], matches))
+        return all_matches
+
+    # Slow path: multiple versions, must read and parse to find correct one
+    worker_path_stats[f'{lang}_slow_path'] += 1
+    for version_path in versions:
+        content = extract_document_content(version_path, lang)
+        if content:
+            doc_tree = parse_xml_from_content(content)
+            if doc_tree:
+                matches = get_document_sentences(doc_tree, para_info)
+                if matches:
+                    all_matches.append((version_path, matches))
+
+    return all_matches
 
 def create_alignments_database(db_path: Path) -> sqlite3.Connection:
     """Create a SQLite database for storing alignments with deduplication."""
@@ -748,6 +952,12 @@ def verify_alignments(folder: str, output: str, num_cpus: int, batch_size: int):
             'src_fast_path': 0, 'src_slow_path': 0,
             'tgt_fast_path': 0, 'tgt_slow_path': 0,
         }
+        # Aggregate timing statistics
+        aggregated_timing = {
+            'unzip_time': 0.0, 'unzip_calls': 0,
+            'xml_parse_time': 0.0, 'xml_parse_calls': 0,
+            'sqlite_query_time': 0.0, 'sqlite_query_calls': 0,
+        }
 
         with gzip.open(tmx_file, 'rt', encoding='utf-8', errors='ignore') as f:
             context = ET.iterparse(f, events=('end',))
@@ -761,12 +971,15 @@ def verify_alignments(folder: str, output: str, num_cpus: int, batch_size: int):
             pbar = tqdm(results_iterator, desc="Processing TMX batches", total=total_batches, unit="batch")
             for result in pbar:
                 if result:
-                    alignments, stats = result
+                    alignments, stats, timing = result
                     # Insert batch results directly to database instead of keeping in memory
                     insert_batch_results_to_db(alignments_conn, alignments)
                     # Aggregate stats
                     for key in aggregated_stats:
                         aggregated_stats[key] += stats.get(key, 0)
+                    # Aggregate timing
+                    for key in aggregated_timing:
+                        aggregated_timing[key] += timing.get(key, 0)
 
         # Log path statistics
         src_total = aggregated_stats['src_fast_path'] + aggregated_stats['src_slow_path']
@@ -777,6 +990,17 @@ def verify_alignments(folder: str, output: str, num_cpus: int, batch_size: int):
             f"Path stats: "
             f"SRC[fast={aggregated_stats['src_fast_path']:,}, slow={aggregated_stats['src_slow_path']:,}, fast%={src_fast_pct:.1f}%] "
             f"TGT[fast={aggregated_stats['tgt_fast_path']:,}, slow={aggregated_stats['tgt_slow_path']:,}, fast%={tgt_fast_pct:.1f}%]"
+        )
+
+        # Log timing breakdown
+        unzip_avg = (aggregated_timing['unzip_time'] / aggregated_timing['unzip_calls'] * 1000) if aggregated_timing['unzip_calls'] > 0 else 0
+        xml_avg = (aggregated_timing['xml_parse_time'] / aggregated_timing['xml_parse_calls'] * 1000) if aggregated_timing['xml_parse_calls'] > 0 else 0
+        sqlite_avg = (aggregated_timing['sqlite_query_time'] / aggregated_timing['sqlite_query_calls'] * 1000) if aggregated_timing['sqlite_query_calls'] > 0 else 0
+        logger.info(
+            f"Timing stats (cumulative across all workers): "
+            f"unzip[{aggregated_timing['unzip_time']:.1f}s total, {aggregated_timing['unzip_calls']:,} calls, {unzip_avg:.2f}ms avg] "
+            f"xml_parse[{aggregated_timing['xml_parse_time']:.1f}s total, {aggregated_timing['xml_parse_calls']:,} calls, {xml_avg:.2f}ms avg] "
+            f"sqlite[{aggregated_timing['sqlite_query_time']:.1f}s total, {aggregated_timing['sqlite_query_calls']:,} calls, {sqlite_avg:.3f}ms avg]"
         )
 
         # Finalize database with indexes for efficient querying
@@ -811,7 +1035,6 @@ def verify_alignments(folder: str, output: str, num_cpus: int, batch_size: int):
             alignments_conn.close()
 
         # Cleanup temp SQLite databases
-        import shutil
         if temp_dir.exists():
             logger.info(f"Cleaning up temp directory: {temp_dir}")
             shutil.rmtree(temp_dir, ignore_errors=True)
