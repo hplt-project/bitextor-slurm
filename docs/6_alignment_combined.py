@@ -72,10 +72,12 @@ worker_src_content_cache: Optional[Dict[str, Optional[bytes]]] = None  # Cache f
 worker_timing_stats: Optional[Dict[str, float]] = None  # Timing instrumentation
 worker_batch_extract_dir: Optional[Path] = None  # Temp directory for batch extractions
 
-def worker_initializer(src_zip_path: Path, tgt_zip_path: Path):
+def worker_initializer(src_zip_path: Path, tgt_zip_path: Path, src_db_path: Path, tgt_db_path: Path):
     """
     Initialize each worker. Stores ZIP paths and connects to SQLite databases.
     Documents are extracted on-demand using unzip -p.
+    Database paths are passed explicitly because forkserver/spawn start methods
+    don't inherit global variables from the parent process.
     """
     global worker_src_zip_path, worker_tgt_zip_path
     global worker_src_db_conn, worker_tgt_db_conn
@@ -86,9 +88,9 @@ def worker_initializer(src_zip_path: Path, tgt_zip_path: Path):
         worker_tgt_zip_path = tgt_zip_path
 
         # Connect to SQLite databases (immutable=1 skips locking, required for network filesystems)
-        logger.info(f"Worker {mp.current_process().pid} connecting to databases: src={shared_src_db_path}, tgt={shared_tgt_db_path}")
-        worker_src_db_conn = sqlite3.connect(f"file:{shared_src_db_path}?immutable=1", uri=True)
-        worker_tgt_db_conn = sqlite3.connect(f"file:{shared_tgt_db_path}?immutable=1", uri=True)
+        logger.info(f"Worker {mp.current_process().pid} connecting to databases: src={src_db_path}, tgt={tgt_db_path}")
+        worker_src_db_conn = sqlite3.connect(f"file:{src_db_path}?immutable=1", uri=True)
+        worker_tgt_db_conn = sqlite3.connect(f"file:{tgt_db_path}?immutable=1", uri=True)
 
         # Initialize path statistics
         worker_path_stats = {
@@ -975,7 +977,7 @@ def verify_alignments(folder: str, output: str, num_cpus: int, batch_size: int):
     logger.info(f"Initializing worker pool with {num_cpus} CPUs...")
     logger.info(f"Multiprocessing start method: {mp.get_start_method()}")
     pool = mp.Pool(num_cpus, initializer=worker_initializer,
-                   initargs=(src_docs_zip, tgt_docs_zip))
+                   initargs=(src_docs_zip, tgt_docs_zip, shared_src_db_path, shared_tgt_db_path))
     
     # Create SQLite database for alignments (avoids keeping all results in memory)
     alignments_db_path = temp_dir / 'alignments.db'
