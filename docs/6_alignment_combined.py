@@ -85,9 +85,10 @@ def worker_initializer(src_zip_path: Path, tgt_zip_path: Path):
         worker_src_zip_path = src_zip_path
         worker_tgt_zip_path = tgt_zip_path
 
-        # Connect to SQLite databases (read-only, shared cache for efficiency)
-        worker_src_db_conn = sqlite3.connect(f"file:{shared_src_db_path}?mode=ro", uri=True)
-        worker_tgt_db_conn = sqlite3.connect(f"file:{shared_tgt_db_path}?mode=ro", uri=True)
+        # Connect to SQLite databases (immutable=1 skips locking, required for network filesystems)
+        logger.info(f"Worker {mp.current_process().pid} connecting to databases: src={shared_src_db_path}, tgt={shared_tgt_db_path}")
+        worker_src_db_conn = sqlite3.connect(f"file:{shared_src_db_path}?immutable=1", uri=True)
+        worker_tgt_db_conn = sqlite3.connect(f"file:{shared_tgt_db_path}?immutable=1", uri=True)
 
         # Initialize path statistics
         worker_path_stats = {
@@ -972,6 +973,7 @@ def verify_alignments(folder: str, output: str, num_cpus: int, batch_size: int):
     logger.info(f"Found {tgt_unique_count:,} unique target documents")
 
     logger.info(f"Initializing worker pool with {num_cpus} CPUs...")
+    logger.info(f"Multiprocessing start method: {mp.get_start_method()}")
     pool = mp.Pool(num_cpus, initializer=worker_initializer,
                    initargs=(src_docs_zip, tgt_docs_zip))
     
