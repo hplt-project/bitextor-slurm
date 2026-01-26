@@ -101,5 +101,10 @@ parser.add_argument('--config', type=str, help='config')
 args = parser.parse_args()
 
 print(f"this is for {args.config}")
-d = load_dataset("/scratch/project_465001864/malikbha/hplt-doc/docmt_hplt.py", args.config, trust_remote_code=True)
-d.push_to_hub("bhavitvyamalik/DocHPLTv2", max_shard_size="2GB", config_name=args.config)
+
+#hf_token = os.getenv("HF_TOKEN")
+#if hf_token is None:
+#    raise ValueError("HF_TOKEN environment variable not set")
+#login(hf_token)
+d = load_dataset("/home/bhaddow/code/bitextor-slurm/docs/docmt_hplt.py", args.config, trust_remote_code=True)
+d.push_to_hub("bhaddow/DocHPLTv2", max_shard_size="2GB", config_name=args.config)

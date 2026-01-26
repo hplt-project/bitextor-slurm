@@ -12,7 +12,7 @@ From: python:3.14.0rc2-slim-trixie
     pip install --no-cache-dir --upgrade pip
 
     # Add additional pip packages here:
-    # pip install --no-cache-dir tqdm datasets
+    pip install --no-cache-dir tqdm datasets==3.6.0
 
 %environment
     export LC_ALL=C

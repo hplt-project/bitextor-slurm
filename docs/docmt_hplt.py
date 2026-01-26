@@ -45,7 +45,7 @@ lang_pair_mapping = {
     "mt": "mlt_Latn",
     "nb": "nob_Latn",
     "ne": "npi_Deva",
-    "nn": "nno_Latn",
+    "no": "nno_Latn", # NB: should be nn
     "si": "sin_Sinh",
     "sk": "slk_Latn",
     "sl": "slv_Latn",
@@ -73,6 +73,8 @@ _LICENSE = ""
 _HOMEPAGE = ""
 _CITATION = ""
 
+
+
 _DOC_URLS = {
     # "af": "/scratch/project_462000764/dayyan/combined/docs/af-deduped-docs.zip",
     # "ar": "/scratch/project_462000764/dayyan/combined/docs/ar-deduped-docs.zip",
@@ -83,7 +85,7 @@ _DOC_URLS = {
     # "bs": "/scratch/project_462000764/dayyan/combined/docs/bs-deduped-docs.zip",
     # "ca": "/scratch/project_462000764/dayyan/combined/docs/ca-deduped-docs.zip",
     # "cy": "/scratch/project_462000764/dayyan/combined/docs/cy-deduped-docs.zip",
-    "en": "/scratch/project_465001864/bitexting_v3/sharded_data/clean/combined/docs/en-deduped-docs.zip",
+    "en": "/fs/bil0/bhaddow/dochplt/bitexting_v3-clean/combined/docs/en-deduped-docs.zip",
     # "eo": "/scratch/project_462000764/dayyan/combined/docs/eo-deduped-docs.zip",
     # "et": "/scratch/project_462000764/dayyan/combined/docs/et-deduped-docs.zip",
     # "eu": "/scratch/project_462000764/dayyan/combined/docs/eu-deduped-docs.zip",
@@ -106,10 +108,10 @@ _DOC_URLS = {
     # "ml": "/scratch/project_462000764/dayyan/combined/docs/ml-deduped-docs.zip",
     # "mr": "/scratch/project_462000764/dayyan/combined/docs/mr-deduped-docs.zip",
     # "ms": "/scratch/project_462000764/dayyan/combined/docs/ms-deduped-docs.zip",
-    "mt": "/scratch/project_465001864/bitexting_v3/sharded_data/clean/combined/docs/mt-deduped-docs.zip",
+    # "mt": "/scratch/project_465001864/bitexting_v3/sharded_data/clean/combined/docs/mt-deduped-docs.zip",
     # "nb": "/scratch/project_462000764/dayyan/combined/docs/nb-deduped-docs.zip",
     # "ne": "/scratch/project_462000764/dayyan/combined/docs/ne-deduped-docs.zip",
-    # "nn": "/scratch/project_462000764/dayyan/combined/docs/nn-deduped-docs.zip",
+    "no": "/fs/bil0/bhaddow/dochplt/bitexting_v3-clean/combined/docs/no-deduped-docs.zip",
     # "si": "/scratch/project_462000764/dayyan/combined/docs/si-deduped-docs.zip",
     # "sk": "/scratch/project_462000764/dayyan/combined/docs/sk-deduped-docs.zip",
     # "sl": "/scratch/project_462000764/dayyan/combined/docs/sl-deduped-docs.zip",
@@ -159,10 +161,10 @@ _ALIGNMENT_URLS = {
     # "en-ml": "/scratch/project_462000764/dayyan/combined/alignments/en-ml.alignments.gz",
     # "en-mr": "/scratch/project_462000764/dayyan/combined/alignments/en-mr.alignments.gz",
     # "en-ms": "/scratch/project_462000764/dayyan/combined/alignments/en-ms.alignments.gz",
-    "en-mt": "/scratch/project_465001864/bitexting_v3/sharded_data/clean/combined/alignments/en-mt.alignments.gz",
+    # "en-mt": "/scratch/project_465001864/bitexting_v3/sharded_data/clean/combined/alignments/en-mt.alignments.gz",
     # "en-nb": "/scratch/project_462000764/dayyan/combined/alignments/en-nb.alignments.gz",
     # "en-ne": "/scratch/project_462000764/dayyan/combined/alignments/en-ne.alignments.gz",
-    # "en-nn": "/scratch/project_462000764/dayyan/combined/alignments/en-nn.alignments.gz",
+    "en-no": "/fs/bil0/bhaddow/dochplt/bitexting_v3-clean/combined/alignments/en-no.alignments.gz",
     # "en-si": "/scratch/project_462000764/dayyan/combined/alignments/en-si.alignments.gz",
     # "en-sk": "/scratch/project_462000764/dayyan/combined/alignments/en-sk.alignments.gz",
     # "en-sl": "/scratch/project_462000764/dayyan/combined/alignments/en-sl.alignments.gz",
