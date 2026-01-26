@@ -1,0 +1,29 @@
+Bootstrap: docker
+From: python:3.14.0rc2-slim-trixie
+
+
+%post
+    # Update package lists and install dependencies
+    apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        && rm -rf /var/lib/apt/lists/*
+
+    # Install Python packages
+    pip install --no-cache-dir --upgrade pip
+
+    # Add additional pip packages here:
+    # pip install --no-cache-dir tqdm datasets
+
+%environment
+    export LC_ALL=C
+    export LANG=C
+
+%runscript
+    exec python "$@"
+
+%help
+    This container is based on Python 3.14.0rc2 (slim-trixie).
+
+    Usage:
+        singularity run container.sif script.py
+        singularity exec container.sif python -c "print('hello')"
