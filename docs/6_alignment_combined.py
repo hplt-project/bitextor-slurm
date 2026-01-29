@@ -324,7 +324,7 @@ def batch_extract_documents(xml_paths: List[str], lang: str, extract_dir: Path) 
             result = subprocess.run(
                 cmd,
                 capture_output=True,
-                timeout=300  # Longer timeout for batch extraction
+                timeout=2000  # Longer timeout for batch extraction
             )
             if worker_timing_stats is not None:
                 worker_timing_stats['unzip_time'] += time.perf_counter() - t0
