@@ -4,7 +4,7 @@
 #SBATCH --error=logs/glob_align_%j.err     # Stderr 
 #SBATCH --partition=small             # Partition name
 #SBATCH --ntasks=1                     # One task
-#SBATCH --cpus-per-task=16           # Number of cores
+#SBATCH --cpus-per-task=32          # Number of cores
 #SBATCH --time=72:00:00              # Run time
 #SBATCH --account=project_465001864    # Billing project
 #SBATCH --mem=480G
@@ -23,7 +23,7 @@ singularity exec \
   python -u 6_alignment_combined.py \
     --folder ${clean_folder}/"$1" \
     --output ${output_folder}/combined \
-    --num_cpu 16 \
+    --num_cpu 32 \
     --batch_size 10000
 
 #  --env TMPDIR=/flash/project_465001864 \

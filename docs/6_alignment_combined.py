@@ -441,45 +441,6 @@ def get_document_versions_from_db(base_path: str, lang: str) -> List[str]:
         worker_timing_stats['sqlite_query_calls'] += 1
     return result
 
-def get_document_matches_optimized(
-    base_path: str,
-    lang: str,
-    para_info: List[Dict]
-) -> List[Tuple[str, List[str]]]:
-    """
-    Get matches for a document, avoiding parsing when possible.
-    Fast path: single version documents don't need XML parsing.
-    """
-    all_matches = []
-    versions = get_document_versions_from_db(base_path, lang)
-
-    if not versions:
-        return all_matches
-
-    if len(versions) == 1:
-        # Fast path: single version, no need to read/parse XML
-        worker_path_stats[f'{lang}_fast_path'] += 1
-        matches = [
-            f"{p['paragraph_num']}.{p['sentence_num']}"
-            for p in para_info if p
-        ]
-        if matches:
-            all_matches.append((versions[0], matches))
-        return all_matches
-
-    # Slow path: multiple versions, must read and parse to find correct one
-    worker_path_stats[f'{lang}_slow_path'] += 1
-    for version_path in versions:
-        content = extract_document_content(version_path, lang)
-        if content:
-            doc_tree = parse_xml_from_content(content)
-            if doc_tree:
-                matches = get_document_sentences(doc_tree, para_info)
-                if matches:
-                    all_matches.append((version_path, matches))
-
-    return all_matches
-
 def deserialize_tu_batch(batch: List[bytes]) -> List:
     """Deserialize a batch of TU elements from bytes (for lxml compatibility with multiprocessing)."""
     if USING_LXML:
@@ -663,29 +624,17 @@ def get_document_matches_from_versions(
     if not versions:
         return all_matches
 
-    if len(versions) == 1:
-        # Fast path: single version, no need to read/parse XML
-        worker_path_stats[f'{lang}_fast_path'] += 1
-        matches = [
-            f"{p['paragraph_num']}.{p['sentence_num']}"
-            for p in para_info if p
-        ]
-        if matches:
-            all_matches.append((versions[0], matches))
-        return all_matches
-
-    # Slow path: multiple versions, must read and parse to find correct one
-    worker_path_stats[f'{lang}_slow_path'] += 1
-    for version_path in versions:
-        content = extract_document_content(version_path, lang)
-        if content:
-            doc_tree = parse_xml_from_content(content)
-            if doc_tree:
-                matches = get_document_sentences(doc_tree, para_info)
-                if matches:
-                    all_matches.append((version_path, matches))
-
+    # Fast path: single version, no need to read/parse XML
+    # Update: there's only ever one version, so use the fast path
+    worker_path_stats[f'{lang}_fast_path'] += 1
+    matches = [
+        f"{p['paragraph_num']}.{p['sentence_num']}"
+        for p in para_info if p
+    ]
+    if matches:
+        all_matches.append((versions[0], matches))
     return all_matches
+
 
 def create_alignments_database(db_path: Path) -> sqlite3.Connection:
     """Create a SQLite database for storing alignments with deduplication."""
