@@ -80,16 +80,17 @@ _HOMEPAGE = ""
 _CITATION = ""
 
 
-_COMBINED_PATH = "/scratch/project_465001864/bitexting_v3/sharded_data/clean/combined/"
+_COMBINED_PATH = "/fs/bil0/bhaddow/dochplt/bitexting_v3-clean/combined/"
 
 _LANGS = ["sq", "bs", "bg", "ca", "cs", "da", "et", "el", "eu", "fi", "ga", "gl", "hr", "hu", "is" , "ka", "lt", "lv", "mk", "mt", "nn", "nb", "ro", "sk", "sl", "sr", "tr", "uk"  ]
 _DOC_URLS = {
-  lang: f"{_COMBINED_PATH}/docs/{lang}-deduped-docs.zip" for lang in _LANGS + ["en"]
+  lang: f"{_COMBINED_PATH}/docs_deduped/{lang}-deduped-docs.zip" for lang in _LANGS + ["en"]
 }
+_ENG_DOCS_DIR = f"{_COMBINED_PATH}/docs_deduped/en-extracted/"
 
 _PAIRS = ["-".join(sorted(("en",lang))) for lang in _LANGS]
 
-_ALIGNMENT_URLS = {pair: f"{_COMBINED_PATH}/alignments/{pair}.alignments.gz" for pair in _PAIRS}
+_ALIGNMENT_URLS = {pair: f"{_COMBINED_PATH}/alignments_deduped/{pair}.alignments.gz" for pair in _PAIRS}
 
 
 
@@ -181,17 +182,14 @@ class DocMTHPLTDataset(datasets.GeneratorBasedBuilder):
         # It can accept any type or nested list/dict and will give back the same structure with the url replaced with path to local files.
         # By default the archives will be extracted and a path to a cached folder where they are extracted is returned instead of the archive
         data_sources = {self.config.name: _ALIGNMENT_URLS[self.config.name]}
-        # eng_docs = dl_manager.download(_DOC_URLS["en"])
-        eng_zip_file = ZipFile(_DOC_URLS["en"], 'r')
 
         return [
             datasets.SplitGenerator(
                 name="train",
                 gen_kwargs={
-                    # "alignment_filepath": dl_manager.download(data_sources[lang]),
                     "lang_pair": lang,
                     "alignment_filepath": data_sources[lang],
-                    "eng_zip_file": eng_zip_file,
+                    "eng_docs_dir": _ENG_DOCS_DIR,
                     "lang_docs_path": _DOC_URLS[lang.split('-')[1]] if lang.startswith("en") else _DOC_URLS[lang.split('-')[0]],
                 }
             )
@@ -226,14 +224,47 @@ class DocMTHPLTDataset(datasets.GeneratorBasedBuilder):
 
         return ids, sents
 
+    def _get_doc_content_from_dir(self, docs_dir, doc):
+        ids = []
+        sents = []
+        filepath = os.path.join(docs_dir, doc)
+
+        try:
+            with open(filepath, 'rb') as f:
+                content = f.read()
+
+            xml_string = content.decode('utf-8')
+
+            with io.StringIO(xml_string) as f:
+                for event, elem in ET.iterparse(f, events=('end',)):
+                    if elem.tag == 's':
+                        if 'id' in elem.attrib and elem.text:
+                            ids.append(elem.attrib['id'])
+                            sents.append(elem.text.strip())
+                        elem.clear()
+
+        except FileNotFoundError as e:
+            print(f"[Warning] File not found: {filepath}")
+            return [], []
+
+        except ET.ParseError as e:
+            print(f"[Warning] XML parse error in file {doc}: {e}")
+            return [], []
+
+        except UnicodeDecodeError as e:
+            print(f"[Warning] Unicode decode error in file {doc}: {e}")
+            return [], []
+
+        return ids, sents
+
     # method parameters are unpacked from `gen_kwargs` as given in `_split_generators`
-    def _generate_examples(self, lang_pair, alignment_filepath, eng_zip_file, lang_docs_path):
+    def _generate_examples(self, lang_pair, alignment_filepath, eng_docs_dir, lang_docs_path):
         # TODO: This method handles input defined in _split_generators to yield (key, example) tuples from the dataset.
-        # The `key` is for legacy reasons (tfds) and is not important in itself, but must be unique for each example.        
-        
+        # The `key` is for legacy reasons (tfds) and is not important in itself, but must be unique for each example.
+
         self.lang = lang_pair.split('-')[1] if lang_pair.startswith("en") else lang_pair.split('-')[0]
         self.key = 0
-        
+
         print(f"reading {self.lang} docs file")
         tgt_zip_file = ZipFile(lang_docs_path, 'r')
 
@@ -243,21 +274,21 @@ class DocMTHPLTDataset(datasets.GeneratorBasedBuilder):
         with gzip.open(alignment_filepath, 'rb') as f:
             with tqdm.wrapattr(f, "read", total=file_size, desc="Parsing") as f_tqdm:
                 context = ET.iterparse(f, events=('end',))
-                
+
                 for event, elem in context:
                     if elem.tag == 'linkGrp':
                         if lang_pair.startswith("en"):  # en-X
                             from_doc = elem.get('fromDoc').split("en/")[-1]
                             to_doc = elem.get('toDoc').split(f"{self.lang}/")[-1]
 
-                            eng_ids, eng_sents = self._get_doc_content_from_zip(eng_zip_file, from_doc)
+                            eng_ids, eng_sents = self._get_doc_content_from_dir(eng_docs_dir, from_doc)
                             lang_ids, lang_sents = self._get_doc_content_from_zip(tgt_zip_file, to_doc)
 
                         else:  # X-en
                             from_doc = elem.get('fromDoc').split(f"{self.lang}/")[-1]
                             to_doc = elem.get('toDoc').split("en/")[-1]
 
-                            eng_ids, eng_sents = self._get_doc_content_from_zip(eng_zip_file, to_doc)
+                            eng_ids, eng_sents = self._get_doc_content_from_dir(eng_docs_dir, to_doc)
                             lang_ids, lang_sents = self._get_doc_content_from_zip(tgt_zip_file, from_doc)
                         
                         # Skip if either doc failed to parse (empty lists)
@@ -311,4 +342,3 @@ class DocMTHPLTDataset(datasets.GeneratorBasedBuilder):
                         elem.clear()
 
         tgt_zip_file.close()
-        eng_zip_file.close()
