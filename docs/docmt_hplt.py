@@ -3,6 +3,7 @@ import io
 import re
 import gzip
 import os
+import sqlite3
 from tqdm import tqdm
 
 from xml.etree import ElementTree as ET
@@ -86,7 +87,7 @@ _LANGS = ["sq", "bs", "bg", "ca", "cs", "da", "et", "el", "eu", "fi", "ga", "gl"
 _DOC_URLS = {
   lang: f"{_COMBINED_PATH}/docs_deduped/{lang}-deduped-docs.zip" for lang in _LANGS + ["en"]
 }
-_ENG_DOCS_DIR = f"{_COMBINED_PATH}/docs_deduped/en-extracted/"
+_ENG_DOCS_DB = f"{_COMBINED_PATH}/docs_deduped/en-docs.db"
 
 _PAIRS = ["-".join(sorted(("en",lang))) for lang in _LANGS]
 
@@ -189,7 +190,7 @@ class DocMTHPLTDataset(datasets.GeneratorBasedBuilder):
                 gen_kwargs={
                     "lang_pair": lang,
                     "alignment_filepath": data_sources[lang],
-                    "eng_docs_dir": _ENG_DOCS_DIR,
+                    "eng_docs_db": _ENG_DOCS_DB,
                     "lang_docs_path": _DOC_URLS[lang.split('-')[1]] if lang.startswith("en") else _DOC_URLS[lang.split('-')[0]],
                 }
             )
@@ -224,15 +225,19 @@ class DocMTHPLTDataset(datasets.GeneratorBasedBuilder):
 
         return ids, sents
 
-    def _get_doc_content_from_dir(self, docs_dir, doc):
+    def _get_doc_content_from_db(self, db_conn, doc):
         ids = []
         sents = []
-        filepath = os.path.join(docs_dir, doc)
 
         try:
-            with open(filepath, 'rb') as f:
-                content = f.read()
+            cursor = db_conn.execute("SELECT content FROM docs WHERE name = ?", (doc,))
+            row = cursor.fetchone()
 
+            if row is None:
+                print(f"[Warning] Document not found in database: {doc}")
+                return [], []
+
+            content = row[0]
             xml_string = content.decode('utf-8')
 
             with io.StringIO(xml_string) as f:
@@ -242,10 +247,6 @@ class DocMTHPLTDataset(datasets.GeneratorBasedBuilder):
                             ids.append(elem.attrib['id'])
                             sents.append(elem.text.strip())
                         elem.clear()
-
-        except FileNotFoundError as e:
-            print(f"[Warning] File not found: {filepath}")
-            return [], []
 
         except ET.ParseError as e:
             print(f"[Warning] XML parse error in file {doc}: {e}")
@@ -258,7 +259,7 @@ class DocMTHPLTDataset(datasets.GeneratorBasedBuilder):
         return ids, sents
 
     # method parameters are unpacked from `gen_kwargs` as given in `_split_generators`
-    def _generate_examples(self, lang_pair, alignment_filepath, eng_docs_dir, lang_docs_path):
+    def _generate_examples(self, lang_pair, alignment_filepath, eng_docs_db, lang_docs_path):
         # TODO: This method handles input defined in _split_generators to yield (key, example) tuples from the dataset.
         # The `key` is for legacy reasons (tfds) and is not important in itself, but must be unique for each example.
 
@@ -267,6 +268,9 @@ class DocMTHPLTDataset(datasets.GeneratorBasedBuilder):
 
         print(f"reading {self.lang} docs file")
         tgt_zip_file = ZipFile(lang_docs_path, 'r')
+
+        print("opening English docs database")
+        eng_db_conn = sqlite3.connect(eng_docs_db)
 
         file_size = os.path.getsize(alignment_filepath)
         print(f"reading {self.lang} alignments file")
@@ -281,14 +285,14 @@ class DocMTHPLTDataset(datasets.GeneratorBasedBuilder):
                             from_doc = elem.get('fromDoc').split("en/")[-1]
                             to_doc = elem.get('toDoc').split(f"{self.lang}/")[-1]
 
-                            eng_ids, eng_sents = self._get_doc_content_from_dir(eng_docs_dir, from_doc)
+                            eng_ids, eng_sents = self._get_doc_content_from_db(eng_db_conn, from_doc)
                             lang_ids, lang_sents = self._get_doc_content_from_zip(tgt_zip_file, to_doc)
 
                         else:  # X-en
                             from_doc = elem.get('fromDoc').split(f"{self.lang}/")[-1]
                             to_doc = elem.get('toDoc').split("en/")[-1]
 
-                            eng_ids, eng_sents = self._get_doc_content_from_dir(eng_docs_dir, to_doc)
+                            eng_ids, eng_sents = self._get_doc_content_from_db(eng_db_conn, to_doc)
                             lang_ids, lang_sents = self._get_doc_content_from_zip(tgt_zip_file, from_doc)
                         
                         # Skip if either doc failed to parse (empty lists)
@@ -342,3 +346,4 @@ class DocMTHPLTDataset(datasets.GeneratorBasedBuilder):
                         elem.clear()
 
         tgt_zip_file.close()
+        eng_db_conn.close()
